@@ -1,6 +1,15 @@
 module github.com/xgen/orchestrator/agent
 
-go 1.22
+go 1.25.0
 
-// 의존성은 proto 생성(make proto) 후 google.golang.org/grpc, protobuf 등이 추가됨.
-// 1차 슬라이스 스캐폴딩 단계라 require 블록은 codegen 후 채운다.
+// gRPC/protobuf 의존성은 생성 코드(make proto -> agent/gen)가 사용한다.
+// gen/ 은 .gitignore 대상이므로 빌드 전 `make proto` 필요. (gen 부재 상태에서 go mod tidy 금지)
+
+require (
+	golang.org/x/net v0.51.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260226221140-a57be14db171 // indirect
+	google.golang.org/grpc v1.81.1 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
+)
