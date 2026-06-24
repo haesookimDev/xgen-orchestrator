@@ -17,6 +17,9 @@ dependencies = [
     "python-jose[cryptography]",  # 운영자 JWT
 ]
 
+[project.optional-dependencies]
+test = ["pytest", "httpx"]  # httpx: FastAPI TestClient
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
