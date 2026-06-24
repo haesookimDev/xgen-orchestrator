@@ -27,20 +27,28 @@ nodes (
   id            uuid PK,
   machine_id    text UNIQUE,        -- /etc/machine-id, 재등록 매칭 키
   hostname      text,
-  status        text,               -- online|offline|disabled|revoked
+  status        text,               -- online|offline|disabled|revoked|pending_reenroll
   os text, arch text,
   agent_version text,
-  cert_serial   text,               -- 발급 cert 식별 (폐기 매칭)
+  cert_serial   text,               -- 현재 cert (이력은 node_certs)
   labels        jsonb,              -- 운영자 태그(역할·그룹)
   enrolled_at   timestamptz,
   last_seen_at  timestamptz
 );
 
--- 등록 토큰 (shared + one_time)
+-- 인증서 발급/폐기 이력 (P0-2, 감사)
+node_certs (
+  id bigserial PK,
+  node_id uuid REFERENCES nodes ON DELETE CASCADE,
+  serial text, spiffe_uri text,     -- SAN: spiffe://xgen/node/<node_id>
+  issued_at timestamptz, revoked_at timestamptz, reason text
+);
+
+-- 등록 토큰 (shared + one_time + re_enroll)
 join_tokens (
   id uuid PK,
   token_hash text UNIQUE,           -- 평문 미저장
-  type text,                        -- shared | one_time
+  type text,                        -- shared | one_time | re_enroll (P0-2)
   expires_at timestamptz,
   max_uses int, used_count int,
   revoked bool,
@@ -77,11 +85,22 @@ jobs (
   id uuid PK,
   node_id uuid REFERENCES nodes,
   command_id text UNIQUE,           -- at-least-once 멱등 키
-  kind text,                        -- run_job | push_bundle | refresh_inventory
-  phase text,                       -- pending|running|succeeded|failed|cancelled
+  kind text,                        -- run_job | push_bundle | refresh_inventory | status
+  phase text,                       -- pending|running|succeeded|failed|cancelled|interrupted
   exit_code int,
+  attempt int, phase_seq int,       -- JobUpdate 재전송 idempotent update (P0-3)
   bundle_ref text, params jsonb,
   created_at timestamptz, started_at timestamptz, finished_at timestamptz
+);
+-- 노드당 mutating Job 1개 락 (P1-2)
+CREATE UNIQUE INDEX one_mutating_job_per_node ON jobs(node_id)
+  WHERE phase IN ('pending','running') AND kind <> 'status';
+
+-- 하행 명령 상태 (at-least-once, CP 재시작 복원) (P0-3)
+commands (
+  command_id text PK,
+  node_id uuid REFERENCES nodes, job_id uuid REFERENCES jobs,
+  sent_at timestamptz, acked_at timestamptz, attempt int
 );
 
 -- Job/설치 로그 (무손실, 라인 단위)
@@ -89,9 +108,17 @@ job_logs (
   id bigserial PK,
   job_id uuid REFERENCES jobs ON DELETE CASCADE,
   ts_unix_ms bigint,
+  source text,                      -- job-id|runtime|agent (LogBatch.source)
   stream text,                      -- stdout | stderr
-  text text
+  "offset" bigint,                  -- source별 단조 offset
+  text text,
+  UNIQUE (job_id, source, "offset")  -- 재전송 중복 insert 차단 (P0-3)
 );
+
+-- 운영자 인증/RBAC/감사 (P0-4, 상세는 07)
+operators ( id uuid PK, username text UNIQUE, pw_hash text, role text );  -- viewer|operator
+audit_log ( id bigserial PK, actor text, action text, target text,
+  detail jsonb, at timestamptz );
 ```
 
 ## 쓰기 경로 (gRPC 메시지 → 테이블)
@@ -101,15 +128,16 @@ job_logs (
 | `Hello` / `Heartbeat` | `nodes.last_seen_at`, `status=online`, `agent_version` 갱신 |
 | `InventoryReport` | content_hash 비교 → 변경 시 `node_inventory` upsert + `node_inventory_history` append + `node_gpus` 재구성 |
 | `MetricBatch` | VictoriaMetrics write (Postgres 아님) |
-| `LogBatch` | `job_logs` insert |
-| `JobUpdate` | `jobs` phase/exit_code/타임스탬프 갱신 |
-| `CommandAck` | 인메모리 at-least-once 추적 해제 |
+| `LogBatch` | `job_logs` insert — `(job_id,source,offset)` 충돌 시 무시(idempotent) |
+| `JobUpdate` | `jobs` 갱신 — 더 큰 `phase_seq`만 반영(idempotent) |
+| `CommandAck` | `commands.acked_at` 기록 (인메모리 아님, CP 재시작 복원) |
 
 ## 상태 전이
 
 ```
 enroll → online ⇄ offline(heartbeat 결손)
-              └ 운영자 → disabled / 침해 → revoked  (다음 연결부터 stream 거부)
+              ├ 운영자 → disabled / 침해 → revoked  (다음 연결부터 stream 거부)
+              └ machine-id 충돌 → pending_reenroll (재등록 토큰 요구, P0-2)
 ```
 
 ## MVP 슬라이스 완결 확인
