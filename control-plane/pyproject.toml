@@ -7,7 +7,7 @@ dependencies = [
     "fastapi",
     "uvicorn[standard]",
     "grpcio",
-    "grpcio-tools",
+    "protobuf>=7.35.1",  # 생성 코드(buf gencode)와 런타임 정합. grpcio-tools는 codegen=buf라 불요.
     "sqlalchemy>=2.0",
     "psycopg[binary]",
     "alembic",

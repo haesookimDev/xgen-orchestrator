@@ -1,13 +1,16 @@
 // Package config — 에이전트 설정/상태 (/etc/xgen-agent/).
 //
 // 입력(server, join token)은 env로 받는다(install.sh/systemd가 주입):
-//   XGEN_SERVER, XGEN_JOIN_TOKEN, XGEN_DIR(기본 /etc/xgen-agent)
+//
+//	XGEN_SERVER, XGEN_JOIN_TOKEN, XGEN_DIR(기본 /etc/xgen-agent)
+//
 // 영속 상태(node_id)는 <dir>/state.json. 인증서는 <dir>/{agent.key,agent.crt,ca.crt}.
 // 설계: docs/design/02-enrollment-security.md
 package config
 
 import (
 	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 )
@@ -16,9 +19,10 @@ const defaultDir = "/etc/xgen-agent"
 
 // Config — 에이전트 런타임 설정.
 type Config struct {
-	Server    string // CP 주소 (https://<cp>)
-	JoinToken string // 최초 부팅 시에만 (등록 후 사용 안 함)
-	Dir       string // 설정/인증서 디렉토리
+	Server     string // CP 등록 주소 (http(s)://<cp>) — REST enroll
+	GRPCServer string // CP gRPC stream 주소 (host:port)
+	JoinToken  string // 최초 부팅 시에만 (등록 후 사용 안 함)
+	Dir        string // 설정/인증서 디렉토리
 
 	state state // 영속 상태 (state.json)
 }
@@ -34,15 +38,32 @@ func Load() (*Config, error) {
 		dir = defaultDir
 	}
 	c := &Config{
-		Server:    os.Getenv("XGEN_SERVER"),
-		JoinToken: os.Getenv("XGEN_JOIN_TOKEN"),
-		Dir:       dir,
+		Server:     os.Getenv("XGEN_SERVER"),
+		GRPCServer: resolveGRPC(os.Getenv("XGEN_SERVER")),
+		JoinToken:  os.Getenv("XGEN_JOIN_TOKEN"),
+		Dir:        dir,
 	}
 	// state.json 있으면 로드 (없으면 미등록 상태로 진행).
 	if b, err := os.ReadFile(c.statePath()); err == nil {
 		_ = json.Unmarshal(b, &c.state)
 	}
 	return c, nil
+}
+
+// resolveGRPC — gRPC stream 주소. XGEN_GRPC_SERVER 우선, 없으면 Server 호스트 + XGEN_GRPC_PORT(기본 18081).
+func resolveGRPC(server string) string {
+	if v := os.Getenv("XGEN_GRPC_SERVER"); v != "" {
+		return v
+	}
+	host := "127.0.0.1"
+	if u, err := url.Parse(server); err == nil && u.Hostname() != "" {
+		host = u.Hostname()
+	}
+	port := os.Getenv("XGEN_GRPC_PORT")
+	if port == "" {
+		port = "18081"
+	}
+	return host + ":" + port
 }
 
 func (c *Config) KeyPath() string   { return filepath.Join(c.Dir, "agent.key") }
