@@ -10,22 +10,24 @@
 | 항목 | 결정 | 함의 |
 |------|------|------|
 | 호스트 실행 | **executor가 호스트에서 root 실행** | xgen-infra 스크립트가 본질적 호스트 레벨(강제 제약) |
-| 번들 전송 | **Out-of-band HTTPS fetch (mTLS)** | RunJob엔 url+sha256만, 대용량·폐쇄망 이미지 대응, stream과 비경합 |
+| 번들 전송 | **CP bundle proxy(mTLS) 기본** → MinIO (P1-1) | RunJob엔 url+sha256만, 단일 mTLS 신뢰 경계, stream과 비경합 |
 | v1 액션 | **install / uninstall / status** | 최단 가치 경로 |
 | 파라미터 모델 | **xgen-infra `sites/*.yaml` 디스크립터 재사용** | 기존 add-site.py 파이프라인 그대로, 이중관리 회피 |
 | Pre-flight | **하드 게이트** (자원 부족 시 차단) | 인벤토리 슬라이스의 첫 수확, 강제실행 옵션 별도 |
+| 동시성 (P1-2) | **노드당 mutating Job 1개 락** | install/uninstall 동시실행 손상 방지, status만 병행 |
 
 ## 실행 흐름
 
 ```
 [운영자] "노드 X에 XGEN을 k3s(single)로 설치, env=dev, domain=..."
    └ CP: Job 생성 → bundle+runtime+action+params 해석
+        ├ 0. 노드 락: 활성 mutating Job 있으면 거부 (status 만 병행 허용)
         ├ 1. Pre-flight: manifest.requires vs node_inventory/node_gpus  → 부족 시 차단
-        ├ 2. 번들 확보: 캐시 없으면 bundle_url(mTLS HTTPS) 제공
+        ├ 2. 번들 확보: 캐시 없으면 bundle_url = CP bundle proxy(mTLS) 제공
         ├ 3. Command{RunJob, command_id} 하행 (at-least-once)
         ▼
 [에이전트 executor] (systemd root)
-   ├ 번들 fetch(HTTPS, 재개·청크) → sha256 검증 → 전개
+   ├ 번들 fetch(CP proxy mTLS, 재개·청크) → sha256 + cosign 검증 → 전개
    ├ params → sites/{site}.yaml 디스크립터로 구성 → add-site.py 등 적용
    ├ manifest action→entry 스크립트 호스트 실행 (setup-k3s.sh / deploy.sh)
    ├ stdout/stderr → LogBatch 라이브 스트리밍 → job_logs
@@ -78,11 +80,29 @@ message RunJob {
   string bundle_ref = 2;        // solution@version
   string runtime = 3;           // docker|k3s|k8s
   string action = 4;            // install|uninstall|status
-  map<string,string> params = 5;// → sites 디스크립터로 구성
-  string bundle_url = 6;        // out-of-band mTLS HTTPS fetch
+  map<string,string> params = 5;// → sites 디스크립터로 구성 (secret 제외, 아래)
+  string bundle_url = 6;        // CP bundle proxy (mTLS), presigned 직접 다운로드 아님
   string bundle_sha256 = 7;
+  repeated string secret_refs = 8;// secret은 값 아닌 참조로 주입 (P1-3)
 }
 ```
+
+## 노드당 Job 동시성·취소·복구 (P1-2)
+
+```
+동시성: 노드당 mutating Job(install/uninstall) 1개 — jobs partial unique index 락.
+        status 등 read-only action만 병행 허용.
+cancel: CancelJob → executor 프로세스 트리 종료 → timeout → partial state 기록
+        → 후속 status/reconcile 로 실제 상태 확인.
+복구  : agent 재시작 시 실행 중이던 Job 감지 → phase=interrupted 보고
+        → 운영자/Reconcile 가 재시도·정리 결정.
+```
+
+## 파라미터 / Secret 처리 (P1-3)
+
+- manifest `params`는 **제한적 자체 스키마**(type: enum/string/int/bool + runtime 조건). JSON Schema 전면 채택은 후속.
+- **secret 값(인증정보 등)은 Job params 평문·로그·job_logs에 남기지 않음.** RunJob.secret_refs 로 참조만 전달, 에이전트가 주입 시점에만 해석.
+- sites descriptor 산출물을 artifact로 저장 시 **민감 필드 masking/암호화**.
 
 ## Pre-flight (하드 게이트)
 
@@ -96,11 +116,11 @@ CP: manifest.requires(cpu/mem/nvidia gpu) vs node_inventory/node_gpus 대조
 
 ```
 외부 xgen-infra ($XGEN_INFRA_PATH) ─bundles/xgen/build.sh→ 번들 tarball(+manifest, 서명)
-   └ CP bundles 저장소(버전·sha256) ──RunJob.bundle_url(mTLS HTTPS)──▶ 에이전트 fetch
+   └ CP bundles 저장소(MinIO) ──RunJob.bundle_url(CP proxy, mTLS)──▶ 에이전트 fetch
 ```
 
-## 미해결/후속 (E 잔여 → 별도 라운드)
-- 번들 버전 관리·서명 키 운영, 다중 솔루션 카탈로그 (E 본편)
-- 동시 Job 직렬화/락 (노드당 1개 설치 동시성 제어)
+## 미해결/후속
+- ~~번들 버전·서명~~ → **확정** ([06](06-catalog-bundles.md))
+- ~~동시 Job 락~~ → **확정** (P1-2, 위)
 - status 액션의 구조화된 결과 스키마
-- 강제실행(Pre-flight 우회) 권한·감사
+- 강제실행(Pre-flight 우회) 권한·감사 → operator role + audit_log ([07](07-operator-surface.md))
