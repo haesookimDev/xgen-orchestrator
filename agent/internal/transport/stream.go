@@ -15,6 +15,7 @@ import (
 
 	pb "github.com/xgen/orchestrator/agent/gen/orchestrator/v1"
 	"github.com/xgen/orchestrator/agent/internal/config"
+	"github.com/xgen/orchestrator/agent/internal/executor"
 	"github.com/xgen/orchestrator/agent/internal/inventory"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -61,36 +62,53 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 
-	// Hello (연결 직후 1회) — CP가 노드를 online 으로 표시.
-	if err := stream.Send(&pb.AgentMessage{
-		NodeId:  cfg.NodeID(),
-		Payload: &pb.AgentMessage_Hello{Hello: &pb.Hello{AgentVersion: "0.1.0"}},
-	}); err != nil {
-		return err
-	}
-	log.Printf("stream: connected to %s as node_id=%s", cfg.GRPCServer, cfg.NodeID())
-
-	// 인벤토리 1회 보고 (변경 감지는 후속). CP가 node_inventory/node_gpus 저장.
-	if rep, err := inventory.Collect(ctx); err == nil {
-		if err := stream.Send(&pb.AgentMessage{
-			NodeId:  cfg.NodeID(),
-			Payload: &pb.AgentMessage_Inventory{Inventory: rep},
-		}); err != nil {
-			log.Printf("stream: inventory send failed: %v", err)
-		} else {
-			log.Printf("stream: inventory sent (cpu=%q gpus=%d hash=%.12s)",
-				rep.GetCpu().GetModel(), len(rep.GetGpus()), rep.GetContentHash())
+	// 단일 송신 경로 — 여러 producer(hello/inventory/heartbeat/executor)가 동시에
+	// stream.Send 하면 unsafe하므로 sendCh로 직렬화.
+	sendCh := make(chan *pb.AgentMessage, 64)
+	send := func(m *pb.AgentMessage) {
+		select {
+		case sendCh <- m:
+		case <-ctx.Done():
 		}
 	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case m := <-sendCh:
+				if err := stream.Send(m); err != nil {
+					log.Printf("stream: send failed: %v", err)
+					return
+				}
+			}
+		}
+	}()
 
-	// 하행 수신 (HelloAck/Ping/Command) — 현재는 로깅만.
+	// Hello (연결 직후 1회) — CP가 노드를 online 으로 표시.
+	send(&pb.AgentMessage{NodeId: cfg.NodeID(), Payload: &pb.AgentMessage_Hello{Hello: &pb.Hello{AgentVersion: "0.1.0"}}})
+	log.Printf("stream: connected to %s as node_id=%s", cfg.GRPCServer, cfg.NodeID())
+
+	// 인벤토리 1회 보고. CP가 node_inventory/node_gpus 저장.
+	if rep, err := inventory.Collect(ctx); err == nil {
+		send(&pb.AgentMessage{NodeId: cfg.NodeID(), Payload: &pb.AgentMessage_Inventory{Inventory: rep}})
+		log.Printf("stream: inventory sent (cpu=%q gpus=%d hash=%.12s)",
+			rep.GetCpu().GetModel(), len(rep.GetGpus()), rep.GetContentHash())
+	}
+
+	// 하행 수신 — Command(RunJob) 디스패치, HelloAck 로깅.
 	go func() {
 		for {
 			msg, err := stream.Recv()
 			if err != nil {
 				return
 			}
-			if msg.GetHelloAck() != nil {
+			if c := msg.GetCommand(); c != nil {
+				if rj := c.GetRunJob(); rj != nil {
+					log.Printf("stream: RunJob job=%s action=%s", rj.GetJobId(), rj.GetAction())
+					go executor.Run(ctx, cfg.NodeID(), sendCh, c.GetCommandId(), rj)
+				}
+			} else if msg.GetHelloAck() != nil {
 				log.Printf("stream: HelloAck (resync=%v)", msg.GetHelloAck().GetResyncRequired())
 			}
 		}
@@ -104,13 +122,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
-			if err := stream.Send(&pb.AgentMessage{
-				NodeId:  cfg.NodeID(),
-				Payload: &pb.AgentMessage_Heartbeat{Heartbeat: &pb.Heartbeat{TsUnixMs: time.Now().UnixMilli()}},
-			}); err != nil {
-				log.Printf("stream: heartbeat send failed: %v", err)
-				return err
-			}
+			send(&pb.AgentMessage{NodeId: cfg.NodeID(), Payload: &pb.AgentMessage_Heartbeat{Heartbeat: &pb.Heartbeat{TsUnixMs: time.Now().UnixMilli()}}})
 		}
 	}
 }

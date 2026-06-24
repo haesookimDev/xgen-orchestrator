@@ -17,6 +17,8 @@ from ..config import settings
 from ..db import models
 from ..db.session import SessionLocal, init_db
 from ..enrollment.ca import InternalCA
+from ..grpc.hub import hub
+from ..pb import job_pb2, stream_pb2
 
 _ca: InternalCA | None = None
 
@@ -103,6 +105,67 @@ def enroll(req: EnrollRequest) -> EnrollResponse:
         client_cert=cert_pem.decode(),
         ca_bundle=_ca.pem.decode(),
     )
+
+
+class JobCreate(BaseModel):
+    action: str = "exec"  # install|uninstall|status|exec (1차: exec, 번들 액션은 후속)
+    params: dict[str, str] = {}
+
+
+@app.post("/v1/nodes/{node_id}/jobs")
+def create_job(node_id: str, body: JobCreate) -> dict:
+    """노드에 Job 생성 → 보안 stream으로 RunJob 명령 push (at-least-once)."""
+    now = dt.datetime.now(dt.timezone.utc)
+    job_id = str(uuid.uuid4())
+    command_id = str(uuid.uuid4())
+    with SessionLocal() as db:
+        node = db.get(models.Node, node_id)
+        if node is None:
+            raise HTTPException(status_code=404, detail="unknown node")
+        if node.status != "online":
+            raise HTTPException(status_code=409, detail="node not online")
+        db.add(models.Job(
+            id=job_id, node_id=node_id, command_id=command_id, kind="run_job",
+            phase="pending", params=body.params, created_at=now))
+        db.add(models.Command(
+            command_id=command_id, node_id=node_id, job_id=job_id, sent_at=now, attempt=1))
+        db.commit()
+
+    cmd = job_pb2.Command(
+        command_id=command_id,
+        run_job=job_pb2.RunJob(job_id=job_id, action=body.action, params=body.params),
+    )
+    if not hub.send(node_id, stream_pb2.ServerMessage(command=cmd)):
+        raise HTTPException(status_code=409, detail="node not connected to stream")
+    return {"job_id": job_id, "command_id": command_id, "phase": "pending"}
+
+
+@app.get("/v1/jobs/{job_id}")
+def get_job(job_id: str) -> dict:
+    with SessionLocal() as db:
+        j = db.get(models.Job, job_id)
+        if j is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+        return {
+            "job_id": j.id, "node_id": j.node_id, "kind": j.kind, "phase": j.phase,
+            "exit_code": j.exit_code, "params": j.params,
+            "created_at": j.created_at.isoformat() if j.created_at else None,
+            "started_at": j.started_at.isoformat() if j.started_at else None,
+            "finished_at": j.finished_at.isoformat() if j.finished_at else None,
+        }
+
+
+@app.get("/v1/jobs/{job_id}/logs")
+def get_job_logs(job_id: str) -> list[dict]:
+    with SessionLocal() as db:
+        rows = db.scalars(
+            select(models.JobLog).where(models.JobLog.job_id == job_id)
+            .order_by(models.JobLog.offset)
+        ).all()
+        return [
+            {"offset": r.offset, "stream": r.stream, "ts_unix_ms": r.ts_unix_ms, "text": r.text}
+            for r in rows
+        ]
 
 
 @app.get("/v1/nodes/{node_id}/inventory")
