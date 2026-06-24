@@ -6,10 +6,13 @@ gRPC(에이전트 stream)는 grpc/server.py (다음 단계). 설계: 02-enrollme
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import os
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
@@ -142,6 +145,39 @@ def list_bundles() -> list[dict]:
         ]
 
 
+@app.put("/v1/bundles/{bundle_id}/artifact")
+async def upload_artifact(bundle_id: str, request: Request) -> dict:
+    """번들 tarball(.tar.gz) 업로드 → CP 저장 + sha256 기록. (raw octet-stream body)"""
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="empty artifact")
+    sha = hashlib.sha256(body).hexdigest()
+    os.makedirs(settings.bundle_dir, exist_ok=True)
+    path = os.path.join(settings.bundle_dir, f"{bundle_id}.tar.gz")
+    with open(path, "wb") as f:
+        f.write(body)
+    with SessionLocal() as db:
+        b = db.get(models.Bundle, bundle_id)
+        if b is None:
+            raise HTTPException(status_code=404, detail="unknown bundle")
+        b.sha256 = sha
+        b.storage_uri = path
+        b.size_bytes = len(body)
+        db.commit()
+    return {"id": bundle_id, "sha256": sha, "size_bytes": len(body)}
+
+
+@app.get("/v1/bundles/{bundle_id}/blob")
+def bundle_blob(bundle_id: str):
+    """번들 아티팩트 다운로드. TODO(P1-1): mTLS proxy / 토큰. 무결성은 sha256(스트림 경유 전달)."""
+    with SessionLocal() as db:
+        b = db.get(models.Bundle, bundle_id)
+        if b is None or not b.storage_uri:
+            raise HTTPException(status_code=404, detail="no artifact")
+        path = b.storage_uri
+    return FileResponse(path, media_type="application/gzip", filename=f"{bundle_id}.tar.gz")
+
+
 class JobCreate(BaseModel):
     bundle: str | None = None  # "solution@version" (없으면 latest). None이면 raw exec(params.cmd)
     runtime: str = "docker"  # docker|k3s
@@ -178,6 +214,8 @@ def create_job(node_id: str, body: JobCreate) -> dict:
     command_id = str(uuid.uuid4())
     action = body.action
     params = dict(body.params)
+    bundle_url = ""
+    bundle_sha256 = ""
 
     with SessionLocal() as db:
         node = db.get(models.Node, node_id)
@@ -198,14 +236,22 @@ def create_job(node_id: str, body: JobCreate) -> dict:
             if rt is None:
                 raise HTTPException(status_code=400, detail=f"runtime {body.runtime} not in manifest")
             act = (rt.get("actions") or {}).get(action)
-            if act is None or "cmd" not in act:
+            if act is None or not ("cmd" in act or "entry" in act):
                 raise HTTPException(status_code=400, detail=f"action {action} not in manifest")
             # Pre-flight 하드 게이트 (force로 우회 가능)
             if not body.force:
                 err = _preflight(rt.get("requires"), node_id, db)
                 if err:
                     raise HTTPException(status_code=412, detail=f"pre-flight failed: {err}")
-            params["cmd"] = act["cmd"]
+            if "entry" in act:
+                # 번들 아티팩트: 에이전트가 tarball fetch+sha256 후 entry 실행.
+                if not bundle.sha256 or not bundle.storage_uri:
+                    raise HTTPException(status_code=409, detail="bundle has no artifact uploaded")
+                params["entry"] = act["entry"]
+                bundle_url = f"{settings.public_url}/v1/bundles/{bundle.id}/blob"
+                bundle_sha256 = bundle.sha256
+            else:
+                params["cmd"] = act["cmd"]
 
         # 노드당 mutating Job 1개 락 (status 등 read-only는 병행 허용)
         if action != "status":
@@ -226,7 +272,8 @@ def create_job(node_id: str, body: JobCreate) -> dict:
     cmd = job_pb2.Command(
         command_id=command_id,
         run_job=job_pb2.RunJob(
-            job_id=job_id, action=action, params=params, bundle_ref=body.bundle or ""),
+            job_id=job_id, action=action, params=params, bundle_ref=body.bundle or "",
+            bundle_url=bundle_url, bundle_sha256=bundle_sha256),
     )
     if not hub.send(node_id, stream_pb2.ServerMessage(command=cmd)):
         raise HTTPException(status_code=409, detail="node not connected to stream")
