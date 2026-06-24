@@ -4,7 +4,8 @@
 > 컨트롤 플레인 플랫폼. Jenkins/ArgoCD 류의 중앙 관제 + 노드별 CLI 에이전트 아키텍처.
 > 이후 LLM Agentic 기능(트러블슈팅·로그분석·자동증설)으로 확장.
 
-상태: **설계 진행 중** (Level-2 일부 확정). 개발은 설계 완료 후 착수.
+상태: **설계 완료** (Level-2 A~G + 리뷰 해소 반영). 개발 착수 가능 수준.
+리뷰 지적·해소: [09-design-review.md](09-design-review.md) · [10-review-resolutions.md](10-review-resolutions.md).
 
 ---
 
@@ -34,7 +35,7 @@
 | 영역 | 결정 | 근거 |
 |------|------|------|
 | 통신 모델 | **Agent-pull** (에이전트 outbound gRPC 양방향 stream) | NAT/방화벽/폐쇄망 뒤 노드도 인바운드 포트 0개 |
-| Control Plane 배포 | **단일 바이너리 + docker-compose** | 설치·PoC 단순, 추후 HA 확장 |
+| Control Plane 배포 | **단일 CP 서비스 컨테이너 + docker-compose** (CP + Postgres + VictoriaMetrics + Grafana + MinIO) | 설치·PoC 단순, 추후 HA 확장 |
 | 규모/테넌시 | **단일 조직, 수십 노드**, 멀티테넌트 불필요 | 설계 단순 유지 |
 | 추상화 수준 | **XGEN 전용 시작**, 솔루션 개념은 내부 추상화만 | 빠르고 현실적, 과설계 방지 |
 | Agent 언어 | **Go** (단일 정적 바이너리) | install.sh 원클릭·크로스컴파일, k8s/gRPC 생태계 |
@@ -46,9 +47,9 @@
 ## 2. 전체 아키텍처
 
 ```
-┌──────── Control Plane (단일 바이너리 + docker-compose, Python/FastAPI) ────────┐
-│  인증/인가 · Job 오케스트레이터 · 인벤토리/상태 DB(Postgres)                   │
-│  메트릭 TSDB(VictoriaMetrics) · 로그 집계 · 솔루션 번들 저장소                 │
+┌─── Control Plane (단일 CP 서비스 컨테이너 + docker-compose, Python/FastAPI) ───┐
+│  인증/인가(Local admin+JWT, 2-role) · Job 오케스트레이터 · 인벤토리/상태 DB(Postgres) │
+│  메트릭 TSDB(VictoriaMetrics) · Grafana · 로그 집계 · 번들 저장소(MinIO)       │
 │  Web UI/대시보드 · [확장] LLM Agentic Layer                                    │
 └───────────────────────────▲───────────────────────────────────────────────────┘
                             │ Agent-pull: 단일 outbound mTLS gRPC stream
@@ -109,12 +110,15 @@
 
 ---
 
-## 4. 미설계 영역 (다음 라운드)
+## 4. 설계 완료 영역 (Level-2)
 
-- A. 에이전트 등록/보안 상세 (bootstrap token 발급·만료, mTLS rotation, install.sh 구체)
-- B. gRPC 프로토콜/API 계약 (메시지 스키마, 명령 종류, 스트림 재연결)
-- C. 데이터 모델/DB 스키마 (nodes, inventory, jobs, metrics, logs)
-- D. Job 오케스트레이션 엔진 (2번째 슬라이스: docker/k3s 설치 워크플로우)
-- E. 솔루션 카탈로그/번들 구조 (CP가 푸시하는 번들 포맷·버전)
-- F. Web UI/대시보드
-- G. LLM Agentic Layer (확장: 트러블슈팅·로그분석·자동증설)
+- ✅ A. 에이전트 등록/보안 — [02](02-enrollment-security.md)
+- ✅ B. gRPC 프로토콜/API 계약 — [03](03-grpc-protocol.md)
+- ✅ C. 데이터 모델/DB 스키마 — [04](04-data-model.md)
+- ✅ D. Job 오케스트레이션 엔진 — [05](05-job-orchestration.md)
+- ✅ E. 솔루션 카탈로그/번들 — [06](06-catalog-bundles.md)
+- ✅ F. Web UI/대시보드 + CLI — [07](07-operator-surface.md)
+- ✅ G. LLM Agentic Layer (자리 예약) — [08](08-llm-agentic-layer.md)
+- ✅ 리뷰 해소 (P0/P1·정합성) — [09](09-design-review.md) · [10](10-review-resolutions.md)
+
+> mTLS rotation은 MVP 비채택(장기 cert + 서버측 상태 게이트). 후속 운영강화 항목.
