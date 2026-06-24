@@ -1,0 +1,14 @@
+{
+  "solution_id": "sample",
+  "version": "0.1.0",
+  "runtimes": {
+    "docker": {
+      "requires": { "cpu_cores": 2, "mem_gb": 2, "gpu": 0 },
+      "actions": {
+        "install": { "entry": "sh install.sh" },
+        "status": { "entry": "sh status.sh" },
+        "uninstall": { "entry": "sh uninstall.sh" }
+      }
+    }
+  }
+}
