@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>xgen-orchestrator</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 1.2rem; }
+    h1 { font-size: 1.2rem; } h2 { font-size: 1rem; margin-top: 1.5rem; }
+    table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+    th, td { border: 1px solid #8884; padding: .3rem .5rem; text-align: left; }
+    th { background: #8882; }
+    .online { color: #2a2; font-weight: 600; } .offline { color: #999; }
+    button { cursor: pointer; padding: .2rem .5rem; }
+    pre { background: #8881; padding: .6rem; overflow:auto; font-size:.8rem; max-height: 40vh; }
+    .row { display:flex; gap:2rem; flex-wrap:wrap; } .col { flex:1; min-width:320px; }
+    code { font-size:.8rem; }
+  </style>
+</head>
+<body>
+  <h1>xgen-orchestrator <small id="cp"></small></h1>
+  <div class="row">
+    <div class="col">
+      <h2>Nodes <button onclick="loadNodes()">↻</button></h2>
+      <table><thead><tr><th>hostname</th><th>status</th><th>os/arch</th><th></th></tr></thead>
+        <tbody id="nodes"></tbody></table>
+      <h2>Bundles <button onclick="loadBundles()">↻</button></h2>
+      <table><thead><tr><th>solution</th><th>version</th><th>runtimes</th><th>latest</th></tr></thead>
+        <tbody id="bundles"></tbody></table>
+    </div>
+    <div class="col">
+      <h2>Detail</h2>
+      <div id="detail"><em>노드를 선택하세요.</em></div>
+    </div>
+  </div>
+
+<script>
+const api = (p, o) => fetch(p, o).then(r => r.ok ? r.json() : r.text().then(t => Promise.reject(t)));
+document.getElementById('cp').textContent = location.origin;
+
+async function loadNodes() {
+  const tb = document.getElementById('nodes'); tb.innerHTML = '';
+  const nodes = await api('/v1/nodes');
+  for (const n of nodes) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${n.hostname||''}</td>
+      <td class="${n.status}">${n.status}</td>
+      <td>${n.os||''}/${n.arch||''}</td>
+      <td><button>detail</button></td>`;
+    tr.querySelector('button').onclick = () => showNode(n.node_id);
+    tb.appendChild(tr);
+  }
+}
+
+async function loadBundles() {
+  const tb = document.getElementById('bundles'); tb.innerHTML = '';
+  const bs = await api('/v1/bundles');
+  for (const b of bs) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${b.solution_id}</td><td>${b.version}</td>
+      <td>${(b.runtimes||[]).join(', ')}</td><td>${b.is_latest?'✓':''}</td>`;
+    tb.appendChild(tr);
+  }
+}
+
+async function showNode(id) {
+  const d = document.getElementById('detail');
+  d.innerHTML = `<p><code>${id}</code></p><p>인벤토리 로딩…</p>`;
+  let inv = null;
+  try { inv = await api(`/v1/nodes/${id}/inventory`); } catch (e) { inv = null; }
+  const bs = await api('/v1/bundles');
+  const opts = bs.map(b => `<option value="${b.solution_id}@${b.version}">${b.solution_id}@${b.version}</option>`).join('');
+  const cpu = inv && inv.data && inv.data.cpu || {};
+  const mem = inv && inv.data && inv.data.memory || {};
+  const gpus = inv && inv.gpus || [];
+  d.innerHTML = `
+    <p><code>${id}</code></p>
+    <h3>Inventory</h3>
+    ${inv ? `<ul>
+      <li>CPU: ${cpu.model||'?'} (${cpu.logical_cores||'?'} cores, ${cpu.arch||''})</li>
+      <li>Mem: ${(Number(mem.total_bytes||0)/1e9).toFixed(1)} GB</li>
+      <li>GPUs: ${gpus.length ? gpus.map(g=>g.model).join(', ') : 'none'}</li>
+    </ul>` : '<em>인벤토리 없음</em>'}
+    <h3>Install</h3>
+    <select id="bsel">${opts}</select>
+    <input id="act" value="install" size="8" />
+    <button onclick="runInstall('${id}')">run</button>
+    <h3>Job</h3>
+    <div id="job"></div>`;
+}
+
+async function runInstall(nodeId) {
+  const bundle = document.getElementById('bsel').value;
+  const action = document.getElementById('act').value || 'install';
+  const job = document.getElementById('job');
+  try {
+    const r = await api(`/v1/nodes/${nodeId}/jobs`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({bundle, runtime:'docker', action})
+    });
+    job.innerHTML = `<p>job <code>${r.job_id}</code> — <span id="jp">pending</span></p><pre id="jl"></pre>`;
+    pollJob(r.job_id);
+  } catch (e) { job.innerHTML = `<p style="color:#c33">error: ${e}</p>`; }
+}
+
+async function pollJob(id, n=0) {
+  const j = await api(`/v1/jobs/${id}`);
+  const jp = document.getElementById('jp'); if (jp) jp.textContent = j.phase + (j.exit_code!=null?` (exit ${j.exit_code})`:'');
+  const logs = await api(`/v1/jobs/${id}/logs`);
+  const jl = document.getElementById('jl'); if (jl) jl.textContent = logs.map(l=>`${l.stream}: ${l.text}`).join('\n');
+  if (['succeeded','failed','cancelled','interrupted'].includes(j.phase) || n>30) return;
+  setTimeout(() => pollJob(id, n+1), 1000);
+}
+
+loadNodes(); loadBundles();
+</script>
+</body>
+</html>

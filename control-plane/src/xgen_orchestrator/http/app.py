@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
@@ -35,6 +36,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="xgen-orchestrator control-plane", lifespan=lifespan)
+
+# 운영자 대시보드 (경량 정적 SPA, REST 소비). 프로덕션 Next.js는 후속(07-operator-surface).
+_STATIC = os.path.join(os.path.dirname(__file__), "static")
+app.mount("/ui", StaticFiles(directory=_STATIC, html=True), name="ui")
 
 
 class NodeInfo(BaseModel):
