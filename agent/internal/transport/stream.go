@@ -5,6 +5,7 @@ package transport
 
 import (
 	"context"
+	"log"
 
 	"github.com/xgen/orchestrator/agent/internal/config"
 )
@@ -19,7 +20,8 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	//    - 로그: durable 큐 -> push (재전송, offset dedup)
 	//    - 명령 수신: command_id 멱등 처리 -> ack
 	// 4. heartbeat 주기 송신
-	// TODO: 구현
+	// TODO: 구현 (proto codegen 필요)
+	log.Println("stream: stub — idling until shutdown (Ctrl-C). TODO: connect mTLS gRPC")
 	<-ctx.Done()
 	return ctx.Err()
 }

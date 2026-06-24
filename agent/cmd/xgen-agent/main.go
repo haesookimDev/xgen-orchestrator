@@ -5,7 +5,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/xgen/orchestrator/agent/internal/config"
 	"github.com/xgen/orchestrator/agent/internal/enroll"
@@ -13,7 +17,9 @@ import (
 )
 
 func main() {
-	ctx := context.Background()
+	// 시그널 컨텍스트: Ctrl-C/SIGTERM까지 정상 대기 (Background의 nil Done() deadlock 방지).
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -25,10 +31,14 @@ func main() {
 		if err := enroll.Run(ctx, cfg); err != nil {
 			log.Fatalf("enroll: %v", err)
 		}
+		log.Printf("enrolled as node_id=%s", cfg.NodeID())
+	} else {
+		log.Printf("already enrolled as node_id=%s", cfg.NodeID())
 	}
 
 	// 단일 outbound mTLS bidi stream 수립 -> 인벤토리/메트릭/로그 push, 명령 수신.
-	if err := transport.Run(ctx, cfg); err != nil {
+	if err := transport.Run(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("stream: %v", err)
 	}
+	log.Println("shutdown")
 }
