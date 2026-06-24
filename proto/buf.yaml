@@ -4,6 +4,13 @@ modules:
 lint:
   use:
     - STANDARD
+  except:
+    # 봉투(envelope) 멀티플렉싱 단일 stream 설계상 의도적 명명 — STANDARD 일부 완화.
+    - SERVICE_SUFFIX             # AgentStream (…Service 아님)
+    - RPC_REQUEST_STANDARD_NAME  # AgentMessage = 멀티플렉싱 봉투
+    - RPC_RESPONSE_STANDARD_NAME # ServerMessage = 멀티플렉싱 봉투
+    - ENUM_VALUE_PREFIX          # Phase.PENDING (PHASE_PENDING 아님)
+    - ENUM_ZERO_VALUE_SUFFIX
 breaking:
   use:
     - FILE
