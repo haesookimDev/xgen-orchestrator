@@ -11,6 +11,7 @@
 | 자율성 수위 | **제안만 (read-only + 권고)** | 모든 행동은 운영자 승인 후. 가장 안전, 신뢰 구축 단계 |
 | 구축 시점 | **자리만 예약, 나중 구현** | 경계·Tool 인터페이스만 설계, MVP/설치 슬라이스 안정 후 구현 |
 | 배치·모델 | **외부 Claude API + 로컬 vLLM 폴백** | 폐쇄망은 xgen-model(로컬) 폴백, 기본은 Claude API |
+| 데이터 반출 (P1-4) | **외부 LLM opt-in + redaction, 폐쇄망 로컬 전용** | 고객·인프라 정보 반출 통제 |
 
 ## 공통 패턴 — 신호 위의 추론 루프
 
@@ -52,8 +53,18 @@ v1 자율성은 **"제안"에서 멈춤** — 실행은 항상 운영자.
 | 메트릭(VM) → 이상 탐지 입력 | [03-grpc-protocol.md](03-grpc-protocol.md) telemetry |
 | RunJob → (승인 후) 행동 출력 | [05-job-orchestration.md](05-job-orchestration.md) |
 
+## 데이터 반출 정책 (P1-4)
+
+입력으로 job_logs·런타임 로그·메트릭·인벤토리를 쓰므로 외부 API 호출 시 고객·인프라 정보가 반출될 수 있음.
+
+```
+opt-in   : 외부 LLM(Claude API)은 site/workspace 단위 opt-in (기본 off)
+redaction: 전송 전 로그·env·토큰·도메인·IP redaction 적용
+폐쇄망   : 외부 Provider 비활성화 → local vLLM provider 만 허용 (강제)
+```
+
 ## 자리 예약의 의미
-- `control-plane/.../llm/` 디렉토리, `LLMProvider` 인터페이스, 읽기 Tool 시그니처만 v1에 둠.
+- `control-plane/.../llm/` 디렉토리, `LLMProvider` 인터페이스, 읽기 Tool 시그니처, redaction 훅만 v1에 둠.
 - 실제 추론·프롬프트·에이전트 루프는 후속. 앞 슬라이스가 신호·훅을 이미 제공하므로 **추가
   인프라 없이** 얹을 수 있음.
 
