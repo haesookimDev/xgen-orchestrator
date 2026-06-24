@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+// 상시 양방향 채널. 단일 멀티플렉싱 stream에 모든 메시지 타입을 봉투(oneof)로 다중화.
+// 설계: docs/design/03-grpc-protocol.md
+package orchestrator.v1;
+
+option go_package = "github.com/xgen/orchestrator/agent/gen/orchestrator/v1;orchestratorv1";
+
+import "orchestrator/v1/inventory.proto";
+import "orchestrator/v1/telemetry.proto";
+import "orchestrator/v1/job.proto";
+
+// 에이전트가 outbound로 수립하는 단일 bidi stream (Agent-pull).
+service AgentStream {
+  rpc Connect(stream AgentMessage) returns (stream ServerMessage);
+}
+
+// 상행 (Agent -> CP)
+message AgentMessage {
+  string node_id = 1;
+  uint64 seq = 2; // 연결 내 단조 증가 (연결 단위 ephemeral, durable dedup은 offset/phase_seq)
+  oneof payload {
+    Hello hello = 10; // 연결 직후 1회
+    Heartbeat heartbeat = 11;
+    InventoryReport inventory = 12;
+    MetricBatch metrics = 13;
+    LogBatch logs = 14;
+    JobUpdate job_update = 15;
+    CommandAck ack = 16;
+  }
+}
+
+// 하행 (CP -> Agent)
+message ServerMessage {
+  uint64 seq = 1;
+  oneof payload {
+    HelloAck hello_ack = 10;
+    Command command = 11;
+    Ping ping = 12;
+  }
+}
+
+message Hello {
+  string agent_version = 1;
+  uint64 last_acked_seq = 2;
+}
+
+message HelloAck {
+  bool resync_required = 1;
+  string reject_reason = 2; // proto 버전 비호환 등 (14-future-and-residuals.md)
+}
+
+message Heartbeat { int64 ts_unix_ms = 1; }
+message Ping {}
+message CommandAck { string command_id = 1; }

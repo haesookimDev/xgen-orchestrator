@@ -1,0 +1,14 @@
+version: v2
+plugins:
+  # Go (agent) — generated into agent/gen/
+  - remote: buf.build/protocolbuffers/go
+    out: ../agent/gen
+    opt: paths=source_relative
+  - remote: buf.build/grpc/go
+    out: ../agent/gen
+    opt: paths=source_relative
+  # Python (control-plane) — generated into control-plane/src/xgen_orchestrator/gen/
+  - remote: buf.build/protocolbuffers/python
+    out: ../control-plane/src/xgen_orchestrator/gen
+  - remote: buf.build/grpc/python
+    out: ../control-plane/src/xgen_orchestrator/gen

@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+// HW 인벤토리 스키마. 베어 노드에서 호스트 직접 수집 (nvidia-smi -> NVML 승격).
+// 설계: docs/design/03-grpc-protocol.md, 04-data-model.md
+package orchestrator.v1;
+
+option go_package = "github.com/xgen/orchestrator/agent/gen/orchestrator/v1;orchestratorv1";
+
+message InventoryReport {
+  CPUInfo cpu = 1;
+  MemoryInfo memory = 2;
+  repeated DiskInfo disks = 3;
+  OSInfo os = 4;
+  Virtualization virt = 5;
+  repeated GPUInfo gpus = 6;
+  string content_hash = 7; // 동일 hash면 무전송 (변경 감지)
+}
+
+message CPUInfo {
+  string model = 1;
+  uint32 physical_cores = 2;
+  uint32 logical_cores = 3;
+  string arch = 4; // amd64 | arm64
+  uint32 sockets = 5;
+}
+
+message MemoryInfo { uint64 total_bytes = 1; }
+
+message DiskInfo {
+  string mount = 1;
+  uint64 total_bytes = 2;
+  string fstype = 3;
+}
+
+message OSInfo {
+  string name = 1;
+  string version = 2;
+  string kernel = 3;
+}
+
+message Virtualization {
+  string type = 1; // bare | kvm | vm
+  bool container_runtime = 2;
+}
+
+message GPUInfo {
+  string model = 1;
+  uint32 index = 2;
+  uint64 vram_bytes = 3;
+  string driver_version = 4;
+  string cuda_version = 5;
+  bool mig_enabled = 6;
+}
