@@ -22,6 +22,10 @@
 | 08 | [LLM Agentic Layer](08-llm-agentic-layer.md) | 트러블슈팅·로그분석·증설 (자리 예약) |
 | 09 | [설계 리뷰](09-design-review.md) | 문서 정합성 · 보안 경계 · 개발 착수 전 보완점 |
 | 10 | [리뷰 해소](10-review-resolutions.md) | P0/P1·정합성 지적의 확정 해소 · 스키마 델타 |
+| 11 | [클러스터 토폴로지](11-cluster-topology.md) | 멀티노드 k3s · 워커 조인 · node-token 중개 |
+| 12 | [운영 정책](12-operational-policies.md) | 보존(메트릭/로그/번들) · 시크릿·키 관리 |
+| 13 | [위협 모델](13-threat-model.md) | 자산 · 신뢰경계 · STRIDE · 잔여 위험 |
+| 14 | [미래 & 잔여](14-future-and-residuals.md) | CP HA 경로 · status 스키마 · 소규모 잔여 기본값 |
 
 ## 확정 결정 요약
 
@@ -42,6 +46,8 @@
 | 번들 | cosign(key) 서명, MinIO 저장, 명시 버전 핀+latest(partial unique index) |
 | 운영자 | Web UI+CLI 병행, WebSocket 라이브, Grafana+자체차트, **Local admin+JWT 2-role+감사** |
 | LLM | 제안만(read-only), 자리 예약, Claude API+로컬 vLLM 폴백, **외부 opt-in+redaction, 폐쇄망 로컬전용** |
+| 클러스터 | 명시적 Cluster 엔티티, CP 플랜 조율(server→worker), node-token CP 암호화 보관, v1=단일+워커 조인 |
+| 운영 정책 | 메트릭 30일, job_logs 30일→MinIO 아카이브, 시크릿=Postgres app-level 암호화(마스터키 파일/env) |
 
 ## 구현 슬라이스 순서 (설계 → 개발 전환 시)
 
