@@ -21,6 +21,8 @@ class Settings:
         # 번들 아티팩트 저장 디렉토리 + 에이전트가 fetch할 공개 베이스 URL.
         self.bundle_dir = os.getenv("XGEN_BUNDLE_DIR", "./cp-bundles")
         self.public_url = os.getenv("XGEN_PUBLIC_URL", f"http://127.0.0.1:{self.port}")
+        # VictoriaMetrics ingest (메트릭). 비어있으면 메트릭 drop(best-effort).
+        self.vm_url = os.getenv("XGEN_VM_URL", "http://127.0.0.1:8428")
 
 
 settings = Settings()

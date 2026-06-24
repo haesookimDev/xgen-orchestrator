@@ -17,11 +17,15 @@ import (
 	"github.com/xgen/orchestrator/agent/internal/config"
 	"github.com/xgen/orchestrator/agent/internal/executor"
 	"github.com/xgen/orchestrator/agent/internal/inventory"
+	"github.com/xgen/orchestrator/agent/internal/metrics"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
 
-const heartbeatInterval = 10 * time.Second
+const (
+	heartbeatInterval = 10 * time.Second
+	metricsInterval   = 10 * time.Second
+)
 
 // clientTLS — 등록으로 받은 client cert/key + CA로 mTLS 자격증명 구성.
 // ServerName 기본값은 dial 호스트; XGEN_GRPC_SERVER_NAME 로 override 가능.
@@ -110,6 +114,20 @@ func Run(ctx context.Context, cfg *config.Config) error {
 				}
 			} else if msg.GetHelloAck() != nil {
 				log.Printf("stream: HelloAck (resync=%v)", msg.GetHelloAck().GetResyncRequired())
+			}
+		}
+	}()
+
+	// 동적 메트릭 주기 push (CP가 VictoriaMetrics에 기록).
+	go func() {
+		mt := time.NewTicker(metricsInterval)
+		defer mt.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-mt.C:
+				send(&pb.AgentMessage{NodeId: cfg.NodeID(), Payload: &pb.AgentMessage_Metrics{Metrics: metrics.Collect(ctx, cfg.NodeID())}})
 			}
 		}
 	}()

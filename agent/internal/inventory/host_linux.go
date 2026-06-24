@@ -59,6 +59,34 @@ func collectCPU() *pb.CPUInfo {
 	return c
 }
 
+// HostMem — 현재 메모리 사용/총량 (동적 메트릭용). used = total - MemAvailable.
+func HostMem() (used, total uint64) {
+	f, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return 0, 0
+	}
+	defer f.Close()
+	var avail uint64
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		kb, _ := strconv.ParseUint(fields[1], 10, 64)
+		switch fields[0] {
+		case "MemTotal:":
+			total = kb * 1024
+		case "MemAvailable:":
+			avail = kb * 1024
+		}
+	}
+	if total >= avail {
+		used = total - avail
+	}
+	return used, total
+}
+
 func memTotalBytes() uint64 {
 	f, err := os.Open("/proc/meminfo")
 	if err != nil {

@@ -14,3 +14,6 @@ func collectHost(rep *pb.InventoryReport) {
 	rep.Os = &pb.OSInfo{Name: runtime.GOOS}
 	rep.Virt = &pb.Virtualization{Type: "unknown"}
 }
+
+// HostMem — 미지원 플랫폼.
+func HostMem() (used, total uint64) { return 0, 0 }

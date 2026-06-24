@@ -30,6 +30,9 @@ services:
     image: victoriametrics/victoria-metrics:latest
     command:
       - "-retentionPeriod=30d"   # 메트릭 보존 30일 (12-operational-policies.md)
+      - "-search.latencyOffset=0s"  # 방금 ingest한 메트릭을 즉시 쿼리/대시보드에 노출
+    ports:
+      - "8428:8428"              # CP가 메트릭 ingest (XGEN_VM_URL)
     volumes:
       - vm-data:/victoria-metrics-data
 
@@ -37,10 +40,14 @@ services:
     image: grafana/grafana:latest
     ports:
       - "3001:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
     depends_on:
       - victoriametrics
     volumes:
       - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning   # VM 데이터소스 + 대시보드 자동 등록
 
   minio:
     image: minio/minio:latest
