@@ -12,6 +12,7 @@ import sys
 from concurrent import futures
 
 import grpc
+from cryptography import x509
 from google.protobuf.json_format import MessageToDict
 from sqlalchemy import select
 
@@ -26,24 +27,36 @@ from ..db import models  # noqa: E402
 from ..db.session import SessionLocal  # noqa: E402
 
 
+_DENY_STATUS = {"disabled", "revoked", "pending_reenroll"}
+
+
 class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
     def Connect(self, request_iterator, context):
-        node_id: str | None = None
+        # mTLS: 클라이언트 cert의 spiffe node_id 추출 + status 게이트 (P0-2, 13-threat-model).
+        peer = _peer_node_id(context)
+        if not peer:
+            context.abort(grpc.StatusCode.UNAUTHENTICATED, "no client cert spiffe id")
+        with SessionLocal() as db:
+            node = db.get(models.Node, peer)
+            if node is None or node.status in _DENY_STATUS:
+                context.abort(grpc.StatusCode.PERMISSION_DENIED, "node not allowed")
+
         try:
             for msg in request_iterator:
+                # 메시지 node_id 는 반드시 cert 주체와 일치해야 한다.
+                if msg.node_id and msg.node_id != peer:
+                    context.abort(grpc.StatusCode.PERMISSION_DENIED, "node_id mismatch")
                 kind = msg.WhichOneof("payload")
                 if kind == "hello":
-                    node_id = msg.node_id
-                    self._touch(node_id, online=True, agent_version=msg.hello.agent_version)
+                    self._touch(peer, online=True, agent_version=msg.hello.agent_version)
                     yield stream_pb2.ServerMessage(hello_ack=stream_pb2.HelloAck(resync_required=False))
                 elif kind == "heartbeat":
-                    self._touch(msg.node_id or node_id, online=True)
+                    self._touch(peer, online=True)
                 elif kind == "inventory":
-                    self._store_inventory(msg.node_id or node_id, msg.inventory)
+                    self._store_inventory(peer, msg.inventory)
                 # metrics/logs/ack -> 후속
         finally:
-            if node_id:
-                self._touch(node_id, online=False)
+            self._touch(peer, online=False)
 
     @staticmethod
     def _touch(node_id: str | None, online: bool = True, agent_version: str | None = None) -> None:
@@ -94,9 +107,43 @@ class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
             db.commit()
 
 
-def serve_grpc(host: str, port: int) -> grpc.Server:
+_SPIFFE_PREFIX = "spiffe://xgen/node/"
+
+
+def _peer_node_id(context) -> str | None:
+    """mTLS peer cert의 SAN spiffe URI에서 node_id 추출."""
+    auth = context.auth_context() or {}
+    pem = None
+    for key in ("x509_pem_cert", b"x509_pem_cert"):
+        vals = auth.get(key)
+        if vals:
+            pem = vals[0]
+            break
+    if not pem:
+        return None
+    if isinstance(pem, str):
+        pem = pem.encode()
+    try:
+        cert = x509.load_pem_x509_certificate(pem)
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        for uri in san.get_values_for_type(x509.UniformResourceIdentifier):
+            if uri.startswith(_SPIFFE_PREFIX):
+                return uri[len(_SPIFFE_PREFIX):]
+    except Exception:
+        return None
+    return None
+
+
+def serve_grpc(host: str, port: int, ca, sans: list[str]) -> grpc.Server:
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
     stream_pb2_grpc.add_AgentStreamServicer_to_server(AgentStreamServicer(), server)
-    server.add_insecure_port(f"{host}:{port}")  # TODO: mTLS creds
+    # mTLS: CA 서명 서버 cert + 클라이언트 cert 필수 검증.
+    cert_pem, key_pem = ca.issue_server_cert(sans)
+    creds = grpc.ssl_server_credentials(
+        [(key_pem, cert_pem)],
+        root_certificates=ca.pem,
+        require_client_auth=True,
+    )
+    server.add_secure_port(f"{host}:{port}", creds)
     server.start()
     return server

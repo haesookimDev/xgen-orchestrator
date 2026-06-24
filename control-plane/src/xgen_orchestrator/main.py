@@ -8,13 +8,15 @@ import uvicorn
 
 from .config import settings
 from .db.session import init_db
+from .enrollment.ca import InternalCA
 from .grpc.server import serve_grpc
 
 
 def main() -> None:
     init_db()
-    grpc_server = serve_grpc(settings.host, settings.grpc_port)
-    print(f"gRPC AgentStream on {settings.host}:{settings.grpc_port}")
+    ca = InternalCA.load_or_create(settings.ca_dir)
+    grpc_server = serve_grpc(settings.host, settings.grpc_port, ca, settings.grpc_sans)
+    print(f"gRPC AgentStream (mTLS) on {settings.host}:{settings.grpc_port}")
     try:
         uvicorn.run("xgen_orchestrator.http.app:app", host=settings.host, port=settings.port)
     finally:

@@ -16,6 +16,8 @@ class Settings:
         self.host = os.getenv("XGEN_HOST", "0.0.0.0")
         self.port = int(os.getenv("XGEN_PORT", "18080"))  # HTTP (REST)
         self.grpc_port = int(os.getenv("XGEN_GRPC_PORT", "18081"))  # gRPC (agent stream)
+        # gRPC 서버 cert SAN (에이전트가 접속하는 주소). IP/DNS 콤마 구분.
+        self.grpc_sans = os.getenv("XGEN_GRPC_SAN", "127.0.0.1,localhost").split(",")
 
 
 settings = Settings()

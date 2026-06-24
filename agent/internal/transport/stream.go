@@ -6,21 +6,51 @@ package transport
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
 	"log"
+	"os"
 	"time"
 
 	pb "github.com/xgen/orchestrator/agent/gen/orchestrator/v1"
 	"github.com/xgen/orchestrator/agent/internal/config"
 	"github.com/xgen/orchestrator/agent/internal/inventory"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 )
 
 const heartbeatInterval = 10 * time.Second
 
+// clientTLS — 등록으로 받은 client cert/key + CA로 mTLS 자격증명 구성.
+// ServerName 기본값은 dial 호스트; XGEN_GRPC_SERVER_NAME 로 override 가능.
+func clientTLS(cfg *config.Config) (credentials.TransportCredentials, error) {
+	cert, err := tls.LoadX509KeyPair(cfg.CertPath(), cfg.KeyPath())
+	if err != nil {
+		return nil, err
+	}
+	caPEM, err := os.ReadFile(cfg.CAPath())
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("invalid CA bundle %s", cfg.CAPath())
+	}
+	tc := &tls.Config{Certificates: []tls.Certificate{cert}, RootCAs: pool}
+	if sn := os.Getenv("XGEN_GRPC_SERVER_NAME"); sn != "" {
+		tc.ServerName = sn
+	}
+	return credentials.NewTLS(tc), nil
+}
+
 // Run — stream 수명주기. ctx 취소까지 유지.
 func Run(ctx context.Context, cfg *config.Config) error {
-	conn, err := grpc.NewClient(cfg.GRPCServer, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds, err := clientTLS(cfg)
+	if err != nil {
+		return fmt.Errorf("mTLS: %w", err)
+	}
+	conn, err := grpc.NewClient(cfg.GRPCServer, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return err
 	}
