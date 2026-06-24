@@ -105,6 +105,32 @@ def enroll(req: EnrollRequest) -> EnrollResponse:
     )
 
 
+@app.get("/v1/nodes/{node_id}/inventory")
+def node_inventory(node_id: str) -> dict:
+    with SessionLocal() as db:
+        inv = db.get(models.NodeInventory, node_id)
+        if inv is None:
+            raise HTTPException(status_code=404, detail="no inventory yet")
+        gpus = db.scalars(select(models.NodeGPU).where(models.NodeGPU.node_id == node_id)).all()
+        return {
+            "node_id": node_id,
+            "content_hash": inv.content_hash,
+            "collected_at": inv.collected_at.isoformat() if inv.collected_at else None,
+            "data": inv.data,
+            "gpus": [
+                {
+                    "index": g.index,
+                    "model": g.model,
+                    "vram_bytes": g.vram_bytes,
+                    "driver_version": g.driver_version,
+                    "cuda_version": g.cuda_version,
+                    "mig_enabled": g.mig_enabled,
+                }
+                for g in gpus
+            ],
+        }
+
+
 @app.get("/v1/nodes")
 def list_nodes() -> list[dict]:
     with SessionLocal() as db:

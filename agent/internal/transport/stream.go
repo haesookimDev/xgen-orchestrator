@@ -11,6 +11,7 @@ import (
 
 	pb "github.com/xgen/orchestrator/agent/gen/orchestrator/v1"
 	"github.com/xgen/orchestrator/agent/internal/config"
+	"github.com/xgen/orchestrator/agent/internal/inventory"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -38,6 +39,19 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 	log.Printf("stream: connected to %s as node_id=%s", cfg.GRPCServer, cfg.NodeID())
+
+	// 인벤토리 1회 보고 (변경 감지는 후속). CP가 node_inventory/node_gpus 저장.
+	if rep, err := inventory.Collect(ctx); err == nil {
+		if err := stream.Send(&pb.AgentMessage{
+			NodeId:  cfg.NodeID(),
+			Payload: &pb.AgentMessage_Inventory{Inventory: rep},
+		}); err != nil {
+			log.Printf("stream: inventory send failed: %v", err)
+		} else {
+			log.Printf("stream: inventory sent (cpu=%q gpus=%d hash=%.12s)",
+				rep.GetCpu().GetModel(), len(rep.GetGpus()), rep.GetContentHash())
+		}
+	}
 
 	// 하행 수신 (HelloAck/Ping/Command) — 현재는 로깅만.
 	go func() {
