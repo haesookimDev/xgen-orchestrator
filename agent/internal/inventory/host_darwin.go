@@ -21,6 +21,11 @@ func collectHost(rep *pb.InventoryReport) {
 	rep.Virt = &pb.Virtualization{Type: "bare"}
 }
 
+// HostMem — total은 hw.memsize, used는 darwin에서 간단치 않아 생략(개발용 노드).
+func HostMem() (used, total uint64) {
+	return 0, sysctlUint("hw.memsize")
+}
+
 func sysctlStr(key string) string {
 	out, err := exec.Command("sysctl", "-n", key).Output()
 	if err != nil {

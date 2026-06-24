@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import queue
 import threading
+import urllib.request
 from concurrent import futures
 
 import grpc
@@ -17,6 +18,7 @@ from cryptography import x509
 from google.protobuf.json_format import MessageToDict
 from sqlalchemy import select
 
+from ..config import settings
 from ..db import models
 from ..db.session import SessionLocal
 from ..pb import stream_pb2, stream_pb2_grpc
@@ -55,6 +57,8 @@ class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
                         self._touch(peer, online=True)
                     elif kind == "inventory":
                         self._store_inventory(peer, msg.inventory)
+                    elif kind == "metrics":
+                        self._write_metrics(msg.metrics)
                     elif kind == "job_update":
                         self._apply_job_update(msg.job_update)
                     elif kind == "logs":
@@ -141,6 +145,23 @@ class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
             if job.phase in _TERMINAL and job.finished_at is None:
                 job.finished_at = now
             db.commit()
+
+    @staticmethod
+    def _write_metrics(batch) -> None:
+        # MetricPoint -> Prometheus exposition -> VictoriaMetrics import. best-effort(drop).
+        if not settings.vm_url or not batch.points:
+            return
+        lines = []
+        for p in batch.points:
+            labels = ",".join(f'{k}="{v}"' for k, v in p.labels.items())
+            lines.append(f"{p.name}{{{labels}}} {p.value} {p.ts_unix_ms}")
+        body = "\n".join(lines).encode()
+        try:
+            req = urllib.request.Request(
+                settings.vm_url + "/api/v1/import/prometheus", data=body, method="POST")
+            urllib.request.urlopen(req, timeout=5).close()
+        except Exception:
+            pass  # 메트릭 drop (TSDB 공백 허용)
 
     @staticmethod
     def _store_logs(logs) -> None:
