@@ -1,24 +1,65 @@
 """grpcio — AgentStream.Connect 종단 (에이전트 단일 bidi stream).
 
-상행: 인벤토리/메트릭(VM)/로그(job_logs)/JobUpdate. 하행: 명령(at-least-once).
-mTLS: cert 주체(spiffe node_id) ↔ 메시지 node_id 매칭, nodes.status 게이트.
-설계: docs/design/03-grpc-protocol.md, 13-threat-model.md.
-
-NOTE: `make proto` 후 생성되는 gen/ 스텁(AgentStreamServicer)을 상속한다.
+1차: Hello/Heartbeat 로 노드 online/last_seen 갱신. 인벤토리/메트릭/로그는 후속.
+TODO: mTLS peer cert ↔ node_id 매칭 + nodes.status 게이트 (P0-2, 13-threat-model).
+설계: docs/design/03-grpc-protocol.md.
 """
+from __future__ import annotations
+
+import datetime as dt
+import os
+import sys
+from concurrent import futures
+
+import grpc
+
+# 생성된 protobuf는 `from orchestrator.v1 import ...` 형식이라 gen 루트를 sys.path에 추가.
+_GEN = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "gen"))
+if _GEN not in sys.path:
+    sys.path.insert(0, _GEN)
+
+from orchestrator.v1 import stream_pb2, stream_pb2_grpc  # noqa: E402
+
+from ..db import models  # noqa: E402
+from ..db.session import SessionLocal  # noqa: E402
 
 
-class AgentStreamService:
-    """make proto 후 orchestrator.v1 AgentStreamServicer 상속으로 교체."""
-
+class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
     def Connect(self, request_iterator, context):
-        # 0. mTLS peer cert에서 spiffe node_id 추출 -> 메시지 node_id 매칭, status 검사
-        # 1. Hello 수신 -> HelloAck (필요 시 resync)
-        # 2. 상행 멀티플렉싱 처리:
-        #    InventoryReport -> node_inventory(+history) + node_gpus (content_hash 비교)
-        #    MetricBatch     -> VictoriaMetrics write
-        #    LogBatch        -> job_logs insert (job_id,source,offset dedup)
-        #    JobUpdate       -> jobs 갱신 (phase_seq idempotent)
-        #    CommandAck      -> commands.acked_at
-        # 3. 하행: 대기 명령을 ServerMessage.command 로 송신, ack 추적
-        raise NotImplementedError
+        node_id: str | None = None
+        try:
+            for msg in request_iterator:
+                kind = msg.WhichOneof("payload")
+                if kind == "hello":
+                    node_id = msg.node_id
+                    self._touch(node_id, online=True, agent_version=msg.hello.agent_version)
+                    yield stream_pb2.ServerMessage(hello_ack=stream_pb2.HelloAck(resync_required=False))
+                elif kind == "heartbeat":
+                    self._touch(msg.node_id or node_id, online=True)
+                # inventory/metrics/logs/ack -> 후속
+        finally:
+            if node_id:
+                self._touch(node_id, online=False)
+
+    @staticmethod
+    def _touch(node_id: str | None, online: bool = True, agent_version: str | None = None) -> None:
+        if not node_id:
+            return
+        now = dt.datetime.now(dt.timezone.utc)
+        with SessionLocal() as db:
+            node = db.get(models.Node, node_id)
+            if node is None:
+                return  # 미등록 node_id (TODO: mTLS 게이트에서 거부)
+            node.last_seen_at = now
+            node.status = "online" if online else "offline"
+            if agent_version:
+                node.agent_version = agent_version
+            db.commit()
+
+
+def serve_grpc(host: str, port: int) -> grpc.Server:
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    stream_pb2_grpc.add_AgentStreamServicer_to_server(AgentStreamServicer(), server)
+    server.add_insecure_port(f"{host}:{port}")  # TODO: mTLS creds
+    server.start()
+    return server

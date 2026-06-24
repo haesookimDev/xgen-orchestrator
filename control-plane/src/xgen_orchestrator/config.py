@@ -14,7 +14,8 @@ class Settings:
         self.join_token = os.getenv("XGEN_JOIN_TOKEN", "test-token")  # TODO: join_tokens 테이블
         self.ca_dir = os.getenv("XGEN_CA_DIR", "./cp-ca")
         self.host = os.getenv("XGEN_HOST", "0.0.0.0")
-        self.port = int(os.getenv("XGEN_PORT", "18080"))
+        self.port = int(os.getenv("XGEN_PORT", "18080"))  # HTTP (REST)
+        self.grpc_port = int(os.getenv("XGEN_GRPC_PORT", "18081"))  # gRPC (agent stream)
 
 
 settings = Settings()
