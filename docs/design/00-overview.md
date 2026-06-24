@@ -121,4 +121,10 @@
 - ✅ G. LLM Agentic Layer (자리 예약) — [08](08-llm-agentic-layer.md)
 - ✅ 리뷰 해소 (P0/P1·정합성) — [09](09-design-review.md) · [10](10-review-resolutions.md)
 
+추가 설계 (잔여 미해결 항목 심화):
+- ✅ 클러스터 토폴로지/멀티노드 — [11](11-cluster-topology.md)
+- ✅ 운영 정책 (보존·시크릿·키) — [12](12-operational-policies.md)
+- ✅ 위협 모델 — [13](13-threat-model.md)
+- ✅ 미래 확장 & 잔여 — [14](14-future-and-residuals.md)
+
 > mTLS rotation은 MVP 비채택(장기 cert + 서버측 상태 게이트). 후속 운영강화 항목.
