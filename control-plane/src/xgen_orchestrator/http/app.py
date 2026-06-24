@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from ..config import settings
 from ..db import models
@@ -107,33 +107,126 @@ def enroll(req: EnrollRequest) -> EnrollResponse:
     )
 
 
+class BundleCreate(BaseModel):
+    solution_id: str
+    version: str
+    manifest: dict  # {"runtimes": {"docker": {"requires": {...}, "actions": {"install": {"cmd": "..."}}}}}
+
+
+@app.post("/v1/bundles")
+def register_bundle(body: BundleCreate) -> dict:
+    now = dt.datetime.now(dt.timezone.utc)
+    bid = str(uuid.uuid4())
+    with SessionLocal() as db:
+        if db.scalar(select(models.Bundle).where(
+                models.Bundle.solution_id == body.solution_id,
+                models.Bundle.version == body.version)):
+            raise HTTPException(status_code=409, detail="bundle version exists")
+        for b in db.scalars(select(models.Bundle).where(
+                models.Bundle.solution_id == body.solution_id)).all():
+            b.is_latest = False
+        db.add(models.Bundle(
+            id=bid, solution_id=body.solution_id, version=body.version,
+            is_latest=True, manifest=body.manifest, created_at=now))
+        db.commit()
+    return {"id": bid, "solution_id": body.solution_id, "version": body.version}
+
+
+@app.get("/v1/bundles")
+def list_bundles() -> list[dict]:
+    with SessionLocal() as db:
+        return [
+            {"id": b.id, "solution_id": b.solution_id, "version": b.version,
+             "is_latest": b.is_latest, "runtimes": list((b.manifest or {}).get("runtimes", {}))}
+            for b in db.scalars(select(models.Bundle)).all()
+        ]
+
+
 class JobCreate(BaseModel):
-    action: str = "exec"  # install|uninstall|status|exec (1차: exec, 번들 액션은 후속)
+    bundle: str | None = None  # "solution@version" (없으면 latest). None이면 raw exec(params.cmd)
+    runtime: str = "docker"  # docker|k3s
+    action: str = "status"  # install|uninstall|status...
     params: dict[str, str] = {}
+    force: bool = False  # Pre-flight 우회 (운영자 override, audit TODO)
+
+
+def _preflight(requires: dict | None, node_id: str, db) -> str | None:
+    """manifest.requires vs 노드 인벤토리. 부족하면 사유 문자열, 통과면 None."""
+    need = requires or {}
+    inv = db.get(models.NodeInventory, node_id)
+    if inv is None or not inv.data:
+        return "no inventory to pre-flight against"
+    data = inv.data
+    cpu = int((data.get("cpu") or {}).get("logical_cores", 0))
+    mem_gb = int((data.get("memory") or {}).get("total_bytes", 0)) / (1024 ** 3)
+    gpu = db.scalar(select(func.count()).select_from(models.NodeGPU)
+                    .where(models.NodeGPU.node_id == node_id)) or 0
+    if cpu < need.get("cpu_cores", 0):
+        return f"cpu cores {cpu} < required {need['cpu_cores']}"
+    if mem_gb + 0.05 < need.get("mem_gb", 0):
+        return f"memory {mem_gb:.1f}GB < required {need['mem_gb']}GB"
+    if gpu < need.get("gpu", 0):
+        return f"gpu count {gpu} < required {need['gpu']}"
+    return None
 
 
 @app.post("/v1/nodes/{node_id}/jobs")
 def create_job(node_id: str, body: JobCreate) -> dict:
-    """노드에 Job 생성 → 보안 stream으로 RunJob 명령 push (at-least-once)."""
+    """Job 생성 → (번들 manifest 해석 + Pre-flight + 노드 락) → RunJob 명령 push."""
     now = dt.datetime.now(dt.timezone.utc)
     job_id = str(uuid.uuid4())
     command_id = str(uuid.uuid4())
+    action = body.action
+    params = dict(body.params)
+
     with SessionLocal() as db:
         node = db.get(models.Node, node_id)
         if node is None:
             raise HTTPException(status_code=404, detail="unknown node")
         if node.status != "online":
             raise HTTPException(status_code=409, detail="node not online")
+
+        # 번들 manifest 해석 (없으면 raw exec 호환)
+        if body.bundle:
+            sol, _, ver = body.bundle.partition("@")
+            q = select(models.Bundle).where(models.Bundle.solution_id == sol)
+            q = q.where(models.Bundle.version == ver) if ver else q.where(models.Bundle.is_latest.is_(True))
+            bundle = db.scalar(q)
+            if bundle is None:
+                raise HTTPException(status_code=404, detail="unknown bundle")
+            rt = (bundle.manifest or {}).get("runtimes", {}).get(body.runtime)
+            if rt is None:
+                raise HTTPException(status_code=400, detail=f"runtime {body.runtime} not in manifest")
+            act = (rt.get("actions") or {}).get(action)
+            if act is None or "cmd" not in act:
+                raise HTTPException(status_code=400, detail=f"action {action} not in manifest")
+            # Pre-flight 하드 게이트 (force로 우회 가능)
+            if not body.force:
+                err = _preflight(rt.get("requires"), node_id, db)
+                if err:
+                    raise HTTPException(status_code=412, detail=f"pre-flight failed: {err}")
+            params["cmd"] = act["cmd"]
+
+        # 노드당 mutating Job 1개 락 (status 등 read-only는 병행 허용)
+        if action != "status":
+            busy = db.scalar(select(models.Job).where(
+                models.Job.node_id == node_id,
+                models.Job.phase.in_(["pending", "running"]),
+                models.Job.kind != "status"))
+            if busy is not None:
+                raise HTTPException(status_code=409, detail=f"node busy with job {busy.id}")
+
         db.add(models.Job(
-            id=job_id, node_id=node_id, command_id=command_id, kind="run_job",
-            phase="pending", params=body.params, created_at=now))
+            id=job_id, node_id=node_id, command_id=command_id, kind=action,
+            phase="pending", bundle_ref=body.bundle, params=params, created_at=now))
         db.add(models.Command(
             command_id=command_id, node_id=node_id, job_id=job_id, sent_at=now, attempt=1))
         db.commit()
 
     cmd = job_pb2.Command(
         command_id=command_id,
-        run_job=job_pb2.RunJob(job_id=job_id, action=body.action, params=body.params),
+        run_job=job_pb2.RunJob(
+            job_id=job_id, action=action, params=params, bundle_ref=body.bundle or ""),
     )
     if not hub.send(node_id, stream_pb2.ServerMessage(command=cmd)):
         raise HTTPException(status_code=409, detail="node not connected to stream")
