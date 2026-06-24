@@ -1,14 +1,15 @@
 """grpcio — AgentStream.Connect 종단 (에이전트 단일 bidi stream).
 
-1차: Hello/Heartbeat 로 노드 online/last_seen 갱신. 인벤토리/메트릭/로그는 후속.
-TODO: mTLS peer cert ↔ node_id 매칭 + nodes.status 게이트 (P0-2, 13-threat-model).
-설계: docs/design/03-grpc-protocol.md.
+상행: Hello/Heartbeat(online/last_seen), InventoryReport(저장), JobUpdate/LogBatch(Job 결과·로그).
+하행: Command(RunJob 등) — HTTP에서 hub로 enqueue, 여기서 yield.
+mTLS: peer cert spiffe node_id ↔ 메시지 node_id 매칭 + status 게이트 (P0-2, 13-threat-model).
+설계: docs/design/03-grpc-protocol.md, 05-job-orchestration.md.
 """
 from __future__ import annotations
 
 import datetime as dt
-import os
-import sys
+import queue
+import threading
 from concurrent import futures
 
 import grpc
@@ -16,23 +17,19 @@ from cryptography import x509
 from google.protobuf.json_format import MessageToDict
 from sqlalchemy import select
 
-# 생성된 protobuf는 `from orchestrator.v1 import ...` 형식이라 gen 루트를 sys.path에 추가.
-_GEN = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "gen"))
-if _GEN not in sys.path:
-    sys.path.insert(0, _GEN)
-
-from orchestrator.v1 import stream_pb2, stream_pb2_grpc  # noqa: E402
-
-from ..db import models  # noqa: E402
-from ..db.session import SessionLocal  # noqa: E402
-
+from ..db import models
+from ..db.session import SessionLocal
+from ..pb import stream_pb2, stream_pb2_grpc
+from .hub import hub
 
 _DENY_STATUS = {"disabled", "revoked", "pending_reenroll"}
+_SPIFFE_PREFIX = "spiffe://xgen/node/"
+_PHASE = {0: "pending", 1: "running", 2: "succeeded", 3: "failed", 4: "cancelled", 5: "interrupted"}
+_TERMINAL = {"succeeded", "failed", "cancelled", "interrupted"}
 
 
 class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
     def Connect(self, request_iterator, context):
-        # mTLS: 클라이언트 cert의 spiffe node_id 추출 + status 게이트 (P0-2, 13-threat-model).
         peer = _peer_node_id(context)
         if not peer:
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "no client cert spiffe id")
@@ -41,22 +38,43 @@ class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
             if node is None or node.status in _DENY_STATUS:
                 context.abort(grpc.StatusCode.PERMISSION_DENIED, "node not allowed")
 
+        outq = hub.register(peer)
+        stop = threading.Event()
+
+        def reader() -> None:
+            try:
+                for msg in request_iterator:
+                    if msg.node_id and msg.node_id != peer:
+                        break  # node_id 불일치 -> 종료
+                    kind = msg.WhichOneof("payload")
+                    if kind == "hello":
+                        self._touch(peer, online=True, agent_version=msg.hello.agent_version)
+                        outq.put(stream_pb2.ServerMessage(
+                            hello_ack=stream_pb2.HelloAck(resync_required=False)))
+                    elif kind == "heartbeat":
+                        self._touch(peer, online=True)
+                    elif kind == "inventory":
+                        self._store_inventory(peer, msg.inventory)
+                    elif kind == "job_update":
+                        self._apply_job_update(msg.job_update)
+                    elif kind == "logs":
+                        self._store_logs(msg.logs)
+            finally:
+                stop.set()
+
+        threading.Thread(target=reader, daemon=True).start()
         try:
-            for msg in request_iterator:
-                # 메시지 node_id 는 반드시 cert 주체와 일치해야 한다.
-                if msg.node_id and msg.node_id != peer:
-                    context.abort(grpc.StatusCode.PERMISSION_DENIED, "node_id mismatch")
-                kind = msg.WhichOneof("payload")
-                if kind == "hello":
-                    self._touch(peer, online=True, agent_version=msg.hello.agent_version)
-                    yield stream_pb2.ServerMessage(hello_ack=stream_pb2.HelloAck(resync_required=False))
-                elif kind == "heartbeat":
-                    self._touch(peer, online=True)
-                elif kind == "inventory":
-                    self._store_inventory(peer, msg.inventory)
-                # metrics/logs/ack -> 후속
+            while not stop.is_set() and context.is_active():
+                try:
+                    yield outq.get(timeout=1.0)
+                except queue.Empty:
+                    continue
         finally:
+            stop.set()
+            hub.unregister(peer, outq)
             self._touch(peer, online=False)
+
+    # ---- 상행 처리 ----
 
     @staticmethod
     def _touch(node_id: str | None, online: bool = True, agent_version: str | None = None) -> None:
@@ -66,13 +84,12 @@ class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
         with SessionLocal() as db:
             node = db.get(models.Node, node_id)
             if node is None:
-                return  # 미등록 node_id (TODO: mTLS 게이트에서 거부)
+                return
             node.last_seen_at = now
             node.status = "online" if online else "offline"
             if agent_version:
                 node.agent_version = agent_version
             db.commit()
-
 
     @staticmethod
     def _store_inventory(node_id: str | None, inv) -> None:
@@ -83,10 +100,10 @@ class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
         data = MessageToDict(inv, preserving_proto_field_name=True)
         with SessionLocal() as db:
             if db.get(models.Node, node_id) is None:
-                return  # 미등록 node_id
+                return
             cur = db.get(models.NodeInventory, node_id)
             if cur is not None and cur.content_hash == content_hash:
-                return  # 변경 없음 -> 무저장
+                return
             if cur is None:
                 db.add(models.NodeInventory(
                     node_id=node_id, content_hash=content_hash, data=data, collected_at=now))
@@ -96,7 +113,6 @@ class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
                 cur.collected_at = now
             db.add(models.NodeInventoryHistory(
                 node_id=node_id, content_hash=content_hash, data=data, collected_at=now))
-            # GPU 비정규화 재구성
             for g in db.scalars(select(models.NodeGPU).where(models.NodeGPU.node_id == node_id)).all():
                 db.delete(g)
             for g in inv.gpus:
@@ -106,12 +122,40 @@ class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
                     mig_enabled=g.mig_enabled))
             db.commit()
 
+    @staticmethod
+    def _apply_job_update(ju) -> None:
+        now = dt.datetime.now(dt.timezone.utc)
+        with SessionLocal() as db:
+            job = db.scalar(select(models.Job).where(models.Job.command_id == ju.command_id))
+            if job is None and ju.job_id:
+                job = db.get(models.Job, ju.job_id)
+            if job is None:
+                return
+            if ju.phase_seq and job.phase_seq and ju.phase_seq < job.phase_seq:
+                return  # 오래된 업데이트 무시 (idempotent)
+            job.phase = _PHASE.get(ju.phase, "pending")
+            job.exit_code = ju.exit_code
+            job.phase_seq = ju.phase_seq
+            if job.phase == "running" and job.started_at is None:
+                job.started_at = now
+            if job.phase in _TERMINAL and job.finished_at is None:
+                job.finished_at = now
+            db.commit()
 
-_SPIFFE_PREFIX = "spiffe://xgen/node/"
+    @staticmethod
+    def _store_logs(logs) -> None:
+        with SessionLocal() as db:
+            for ln in logs.lines:
+                db.add(models.JobLog(
+                    job_id=logs.source, ts_unix_ms=ln.ts_unix_ms, source=logs.source,
+                    stream=ln.stream, offset=ln.offset, text=ln.text))
+            try:
+                db.commit()  # (job_id,source,offset) UNIQUE 로 중복 차단
+            except Exception:
+                db.rollback()
 
 
 def _peer_node_id(context) -> str | None:
-    """mTLS peer cert의 SAN spiffe URI에서 node_id 추출."""
     auth = context.auth_context() or {}
     pem = None
     for key in ("x509_pem_cert", b"x509_pem_cert"):
@@ -135,15 +179,11 @@ def _peer_node_id(context) -> str | None:
 
 
 def serve_grpc(host: str, port: int, ca, sans: list[str]) -> grpc.Server:
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
     stream_pb2_grpc.add_AgentStreamServicer_to_server(AgentStreamServicer(), server)
-    # mTLS: CA 서명 서버 cert + 클라이언트 cert 필수 검증.
     cert_pem, key_pem = ca.issue_server_cert(sans)
     creds = grpc.ssl_server_credentials(
-        [(key_pem, cert_pem)],
-        root_certificates=ca.pem,
-        require_client_auth=True,
-    )
+        [(key_pem, cert_pem)], root_certificates=ca.pem, require_client_auth=True)
     server.add_secure_port(f"{host}:{port}", creds)
     server.start()
     return server
