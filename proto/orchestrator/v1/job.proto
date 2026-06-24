@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+// 하행 명령(Command) + 상행 진행/결과(JobUpdate). at-least-once + command_id 멱등.
+// 번들은 CP bundle proxy(mTLS)에서 fetch, secret은 secret_refs로만 주입 (P1-1, P1-3).
+// 설계: docs/design/05-job-orchestration.md
+package orchestrator.v1;
+
+option go_package = "github.com/xgen/orchestrator/agent/gen/orchestrator/v1;orchestratorv1";
+
+message Command {
+  string command_id = 1; // 멱등 키
+  oneof kind {
+    RunJob run_job = 10;
+    RefreshInventory refresh = 11;
+    PushBundle push_bundle = 12;
+    CancelJob cancel = 13;
+  }
+}
+
+message RunJob {
+  string job_id = 1;
+  string bundle_ref = 2; // solution@version
+  string runtime = 3; // docker | k3s | k8s
+  string action = 4; // install | uninstall | status
+  map<string, string> params = 5; // -> sites 디스크립터 (secret 제외)
+  string bundle_url = 6; // CP bundle proxy (mTLS)
+  string bundle_sha256 = 7;
+  repeated string secret_refs = 8; // 값 아닌 참조로 주입
+}
+
+message RefreshInventory {}
+message PushBundle { string bundle_ref = 1; string bundle_url = 2; string bundle_sha256 = 3; }
+message CancelJob { string job_id = 1; }
+
+message JobUpdate {
+  string command_id = 1;
+  string job_id = 2;
+  enum Phase {
+    PENDING = 0;
+    RUNNING = 1;
+    SUCCEEDED = 2;
+    FAILED = 3;
+    CANCELLED = 4;
+    INTERRUPTED = 5;
+  }
+  Phase phase = 3;
+  int32 exit_code = 4;
+  string message = 5;
+  uint32 attempt = 6; // 재전송 idempotent update 키
+  uint32 phase_seq = 7;
+}

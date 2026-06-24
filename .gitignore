@@ -1,0 +1,26 @@
+# proto 생성물 (codegen)
+/agent/gen/
+/control-plane/src/xgen_orchestrator/gen/
+
+# Go
+/agent/bin/
+*.test
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+/control-plane/build/
+/control-plane/dist/
+
+# Node / web
+/web/node_modules/
+/web/.next/
+
+# 로컬 환경
+.env
+*.local
+
+# 빌드된 에이전트 바이너리 배포물
+/dist/

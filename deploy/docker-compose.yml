@@ -1,0 +1,62 @@
+# Control Plane 자체 배포 — 단일 CP 서비스 컨테이너 + 의존 컴포넌트.
+# 설계: docs/design/01-repo-structure.md, 00-overview.md
+#
+# 구성: control-plane + Postgres + VictoriaMetrics + Grafana + MinIO
+
+services:
+  control-plane:
+    build: ../control-plane
+    env_file: .env
+    ports:
+      - "8000:8000"     # FastAPI (운영자 REST + install.sh/번들 서빙)
+      - "8443:8443"     # gRPC (에이전트 mTLS stream)
+    depends_on:
+      - postgres
+      - victoriametrics
+      - minio
+    volumes:
+      - cp-data:/var/lib/xgen-cp   # CA 키, 마스터 키(0600) 등
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${PG_USER}
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_DB: ${PG_DB}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:latest
+    command:
+      - "-retentionPeriod=30d"   # 메트릭 보존 30일 (12-operational-policies.md)
+    volumes:
+      - vm-data:/victoria-metrics-data
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    depends_on:
+      - victoriametrics
+    volumes:
+      - grafana-data:/var/lib/grafana
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+volumes:
+  cp-data:
+  pg-data:
+  vm-data:
+  grafana-data:
+  minio-data:

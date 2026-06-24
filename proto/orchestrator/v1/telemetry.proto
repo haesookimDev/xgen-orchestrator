@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+// 메트릭/로그 push. 메트릭은 VictoriaMetrics로, 로그는 job_logs로.
+// durable 로그는 (job_id, source, offset)로 중복 제거 (P0-3).
+// 설계: docs/design/03-grpc-protocol.md
+package orchestrator.v1;
+
+option go_package = "github.com/xgen/orchestrator/agent/gen/orchestrator/v1;orchestratorv1";
+
+message MetricBatch { repeated MetricPoint points = 1; }
+
+message MetricPoint {
+  string name = 1;
+  map<string, string> labels = 2;
+  double value = 3;
+  int64 ts_unix_ms = 4;
+}
+
+message LogBatch {
+  string source = 1; // job-id | runtime | agent
+  repeated LogLine lines = 2;
+}
+
+message LogLine {
+  int64 ts_unix_ms = 1;
+  string stream = 2; // stdout | stderr
+  string text = 3;
+  uint64 offset = 4; // source별 단조 offset -> 중복 제거 키
+}
