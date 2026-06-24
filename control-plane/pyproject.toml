@@ -1,0 +1,25 @@
+[project]
+name = "xgen-orchestrator-control-plane"
+version = "0.0.1"
+description = "xgen-orchestrator Control Plane (FastAPI + grpcio)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "grpcio",
+    "grpcio-tools",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]",
+    "alembic",
+    "pydantic>=2",
+    "cryptography",          # CSR 서명(내부 CA), 시크릿 app-level 암호화
+    "minio",                 # 번들 저장/프록시
+    "python-jose[cryptography]",  # 운영자 JWT
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
