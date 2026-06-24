@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"context"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -32,14 +33,6 @@ func Run(ctx context.Context, nodeID string, sendCh chan<- *pb.AgentMessage, com
 		CommandId: commandID, JobId: jobID, Phase: pb.JobUpdate_RUNNING, PhaseSeq: 1,
 	}}})
 
-	cmdStr := rj.GetParams()["cmd"]
-	if cmdStr == "" {
-		cmdStr = "echo 'no cmd param (TODO: bundle action)'"
-	}
-	c := exec.CommandContext(ctx, "sh", "-c", cmdStr)
-	stdout, _ := c.StdoutPipe()
-	stderr, _ := c.StderrPipe()
-
 	var off uint64
 	emit := func(stream, text string) {
 		o := atomic.AddUint64(&off, 1) - 1
@@ -48,6 +41,38 @@ func Run(ctx context.Context, nodeID string, sendCh chan<- *pb.AgentMessage, com
 			Lines:  []*pb.LogLine{{TsUnixMs: time.Now().UnixMilli(), Stream: stream, Text: text, Offset: o}},
 		}}})
 	}
+
+	var cmdStr, workdir string
+	if rj.GetBundleUrl() != "" {
+		// 번들 아티팩트: fetch+sha256 검증 후 전개, manifest entry를 전개 디렉토리에서 실행.
+		dir, err := fetchAndExtract(ctx, rj.GetBundleUrl(), rj.GetBundleSha256())
+		if err != nil {
+			emit("stderr", "bundle: "+err.Error())
+			push(&pb.AgentMessage{Payload: &pb.AgentMessage_JobUpdate{JobUpdate: &pb.JobUpdate{
+				CommandId: commandID, JobId: jobID, Phase: pb.JobUpdate_FAILED, ExitCode: 1, PhaseSeq: 2,
+			}}})
+			push(&pb.AgentMessage{Payload: &pb.AgentMessage_Ack{Ack: &pb.CommandAck{CommandId: commandID}}})
+			return
+		}
+		defer os.RemoveAll(dir)
+		workdir = dir
+		cmdStr = rj.GetParams()["entry"]
+		if cmdStr == "" {
+			cmdStr = "echo 'no entry in manifest'"
+		}
+	} else {
+		cmdStr = rj.GetParams()["cmd"]
+		if cmdStr == "" {
+			cmdStr = "echo 'no cmd param'"
+		}
+	}
+	c := exec.CommandContext(ctx, "sh", "-c", cmdStr)
+	if workdir != "" {
+		c.Dir = workdir
+	}
+	stdout, _ := c.StdoutPipe()
+	stderr, _ := c.StderrPipe()
+
 	pump := func(wg *sync.WaitGroup, r io.Reader, name string) {
 		defer wg.Done()
 		sc := bufio.NewScanner(r)
