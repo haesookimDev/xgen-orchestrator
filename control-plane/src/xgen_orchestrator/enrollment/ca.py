@@ -6,6 +6,7 @@ CSR을 서명해 SAN=spiffe://xgen/node/<node_id> 를 박은 client cert 발급 
 from __future__ import annotations
 
 import datetime as dt
+import ipaddress
 import os
 
 from cryptography import x509
@@ -86,3 +87,38 @@ class InternalCA:
             .sign(self.key, hashes.SHA256())
         )
         return cert.public_bytes(serialization.Encoding.PEM)
+
+    def issue_server_cert(self, sans: list[str]) -> tuple[bytes, bytes]:
+        """gRPC 서버 TLS cert 발급 (CA 서명). sans = IP/DNS 목록. (cert_pem, key_pem)"""
+        key = ec.generate_private_key(ec.SECP256R1())
+        san_objs: list[x509.GeneralName] = []
+        for s in sans:
+            s = s.strip()
+            if not s:
+                continue
+            try:
+                san_objs.append(x509.IPAddress(ipaddress.ip_address(s)))
+            except ValueError:
+                san_objs.append(x509.DNSName(s))
+        now = dt.datetime.now(dt.timezone.utc)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "xgen-cp")]))
+            .issuer_name(self.cert.subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(hours=1))
+            .not_valid_after(now + dt.timedelta(days=365))
+            .add_extension(x509.SubjectAlternativeName(san_objs), critical=False)
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .sign(self.key, hashes.SHA256())
+        )
+        return (
+            cert.public_bytes(serialization.Encoding.PEM),
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            ),
+        )
