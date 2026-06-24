@@ -15,7 +15,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	cfg, err := config.Load("/etc/xgen-agent/config.yaml")
+	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
