@@ -71,7 +71,7 @@ xgen-orchestrator/
 │       └── build.sh                # $XGEN_INFRA_PATH 체크아웃 참조 → 번들 tarball 생성
 │
 ├── deploy/                         # ★ Control Plane 자체 배포
-│   ├── docker-compose.yml          # CP + Postgres + VictoriaMetrics + Grafana
+│   ├── docker-compose.yml          # CP + Postgres + VictoriaMetrics + Grafana + MinIO
 │   ├── .env.example
 │   └── install-cp.sh               # CP 원클릭 설치
 │
@@ -85,7 +85,7 @@ xgen-orchestrator/
   계약 불일치를 구조적으로 차단. `agent/gen/`·`control-plane/src/.../gen/`은 생성물.
 - **`agent/internal/inventory/gpu/`의 Collector 인터페이스** — "nvidia-smi 시작 → NVML 승격"
   결정을 구조로 못박음. 구현 교체가 인터페이스 뒤에서만 발생.
-- **CP는 단일 Python 서비스에 http + grpc 공존** — 단일 바이너리+compose 철학과 일치.
+- **CP는 단일 Python 서비스에 http + grpc 공존** — 단일 CP 서비스 컨테이너 + docker-compose 철학과 일치.
 - **`bundles/`가 xgen-infra ↔ orchestrator 경계** — 비벤더. `build.sh`가 외부
   `$XGEN_INFRA_PATH`를 참조해 번들 tarball 생성, `manifest.yaml`이 런타임별 엔트리포인트 선언.
   → orchestrator 레포는 xgen-infra 소스를 품지 않아 결합도 최소.
