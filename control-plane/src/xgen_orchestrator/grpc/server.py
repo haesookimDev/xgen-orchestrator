@@ -12,6 +12,8 @@ import sys
 from concurrent import futures
 
 import grpc
+from google.protobuf.json_format import MessageToDict
+from sqlalchemy import select
 
 # 생성된 protobuf는 `from orchestrator.v1 import ...` 형식이라 gen 루트를 sys.path에 추가.
 _GEN = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "gen"))
@@ -36,7 +38,9 @@ class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
                     yield stream_pb2.ServerMessage(hello_ack=stream_pb2.HelloAck(resync_required=False))
                 elif kind == "heartbeat":
                     self._touch(msg.node_id or node_id, online=True)
-                # inventory/metrics/logs/ack -> 후속
+                elif kind == "inventory":
+                    self._store_inventory(msg.node_id or node_id, msg.inventory)
+                # metrics/logs/ack -> 후속
         finally:
             if node_id:
                 self._touch(node_id, online=False)
@@ -54,6 +58,39 @@ class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
             node.status = "online" if online else "offline"
             if agent_version:
                 node.agent_version = agent_version
+            db.commit()
+
+
+    @staticmethod
+    def _store_inventory(node_id: str | None, inv) -> None:
+        if not node_id:
+            return
+        now = dt.datetime.now(dt.timezone.utc)
+        content_hash = inv.content_hash
+        data = MessageToDict(inv, preserving_proto_field_name=True)
+        with SessionLocal() as db:
+            if db.get(models.Node, node_id) is None:
+                return  # 미등록 node_id
+            cur = db.get(models.NodeInventory, node_id)
+            if cur is not None and cur.content_hash == content_hash:
+                return  # 변경 없음 -> 무저장
+            if cur is None:
+                db.add(models.NodeInventory(
+                    node_id=node_id, content_hash=content_hash, data=data, collected_at=now))
+            else:
+                cur.content_hash = content_hash
+                cur.data = data
+                cur.collected_at = now
+            db.add(models.NodeInventoryHistory(
+                node_id=node_id, content_hash=content_hash, data=data, collected_at=now))
+            # GPU 비정규화 재구성
+            for g in db.scalars(select(models.NodeGPU).where(models.NodeGPU.node_id == node_id)).all():
+                db.delete(g)
+            for g in inv.gpus:
+                db.add(models.NodeGPU(
+                    node_id=node_id, index=g.index, model=g.model, vram_bytes=g.vram_bytes,
+                    driver_version=g.driver_version, cuda_version=g.cuda_version,
+                    mig_enabled=g.mig_enabled))
             db.commit()
 
 
