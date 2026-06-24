@@ -1,11 +1,54 @@
-"""FastAPI — 운영자 REST + 에이전트 등록(REST) + install.sh/바이너리/번들 서빙.
+"""FastAPI — 운영자 REST + 에이전트 등록(REST).
 
-gRPC(에이전트 stream)는 grpc/server.py가 담당. 운영자 인증=JWT 2-role (P0-4).
-설계: docs/design/02-enrollment-security.md, 06, 07.
+1차 슬라이스: /v1/enroll (내부 CA가 CSR 서명) + /v1/nodes + /healthz.
+gRPC(에이전트 stream)는 grpc/server.py (다음 단계). 설계: 02-enrollment-security.md, 07.
 """
-from fastapi import FastAPI
+from __future__ import annotations
 
-app = FastAPI(title="xgen-orchestrator control-plane")
+import datetime as dt
+import uuid
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import select
+
+from ..config import settings
+from ..db import models
+from ..db.session import SessionLocal, init_db
+from ..enrollment.ca import InternalCA
+
+_ca: InternalCA | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _ca
+    init_db()
+    _ca = InternalCA.load_or_create(settings.ca_dir)
+    yield
+
+
+app = FastAPI(title="xgen-orchestrator control-plane", lifespan=lifespan)
+
+
+class NodeInfo(BaseModel):
+    hostname: str = ""
+    machine_id: str
+    os: str = ""
+    arch: str = ""
+
+
+class EnrollRequest(BaseModel):
+    join_token: str
+    csr: str  # PEM
+    node_info: NodeInfo
+
+
+class EnrollResponse(BaseModel):
+    node_id: str
+    client_cert: str  # PEM
+    ca_bundle: str  # PEM
 
 
 @app.get("/healthz")
@@ -13,37 +56,68 @@ def healthz() -> dict:
     return {"status": "ok"}
 
 
-@app.get("/install.sh")
-def install_sh():
-    """에이전트 원클릭 설치 스크립트 서빙. 신뢰 CA TLS로 제공 (P0-1)."""
-    # TODO: scripts/install.sh 를 server 주소/파라미터 치환해 반환
-    raise NotImplementedError
+@app.post("/v1/enroll", response_model=EnrollResponse)
+def enroll(req: EnrollRequest) -> EnrollResponse:
+    if req.join_token != settings.join_token:
+        raise HTTPException(status_code=401, detail="invalid join token")
 
+    now = dt.datetime.now(dt.timezone.utc)
+    with SessionLocal() as db:
+        node = db.scalar(
+            select(models.Node).where(models.Node.machine_id == req.node_info.machine_id)
+        )
+        if node is None:
+            node = models.Node(
+                id=str(uuid.uuid4()),
+                machine_id=req.node_info.machine_id,
+                hostname=req.node_info.hostname,
+                status="online",
+                os=req.node_info.os,
+                arch=req.node_info.arch,
+                enrolled_at=now,
+                last_seen_at=now,
+            )
+            db.add(node)
+        else:
+            # TODO(P0-2): 중복 machine_id -> pending_reenroll + 재등록 토큰.
+            # 1차 구현은 멱등 재등록(기존 node_id 재사용).
+            node.hostname = req.node_info.hostname
+            node.last_seen_at = now
+        node_id = node.id
 
-@app.post("/v1/enroll")
-def enroll():
-    """등록(REST). join_token 검증 -> machine-id 신규면 자동승인, 중복이면 pending_reenroll.
-    내부 CA가 CSR 서명(SAN=spiffe node_id) -> {node_id, client_cert, ca_bundle}. (P0-2)"""
-    # TODO: 구현
-    raise NotImplementedError
+        try:
+            cert_pem = _ca.sign_csr(req.csr.encode(), node_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        db.add(models.NodeCert(
+            node_id=node_id,
+            serial="",
+            spiffe_uri=f"spiffe://xgen/node/{node_id}",
+            issued_at=now,
+        ))
+        db.commit()
+
+    return EnrollResponse(
+        node_id=node_id,
+        client_cert=cert_pem.decode(),
+        ca_bundle=_ca.pem.decode(),
+    )
 
 
 @app.get("/v1/nodes")
-def list_nodes():
-    """노드 목록·상태 (viewer)."""
-    # TODO
-    raise NotImplementedError
-
-
-@app.get("/v1/nodes/{node_id}/inventory")
-def node_inventory(node_id: str):
-    """노드 인벤토리 상세 (CPU/GPU/디스크)."""
-    # TODO
-    raise NotImplementedError
-
-
-@app.get("/v1/bundles/{bundle_id}/blob")
-def bundle_proxy(bundle_id: str):
-    """번들 다운로드 — CP bundle proxy(mTLS) -> MinIO (P1-1). presigned 직접 아님."""
-    # TODO
-    raise NotImplementedError
+def list_nodes() -> list[dict]:
+    with SessionLocal() as db:
+        nodes = db.scalars(select(models.Node)).all()
+        return [
+            {
+                "node_id": n.id,
+                "hostname": n.hostname,
+                "machine_id": n.machine_id,
+                "status": n.status,
+                "os": n.os,
+                "arch": n.arch,
+                "enrolled_at": n.enrolled_at.isoformat() if n.enrolled_at else None,
+            }
+            for n in nodes
+        ]
