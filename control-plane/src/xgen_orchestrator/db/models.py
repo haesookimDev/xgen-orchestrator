@@ -51,7 +51,7 @@ class Node(Base):
 
 class NodeCert(Base):  # 인증서 발급/폐기 이력 (P0-2, 감사)
     __tablename__ = "node_certs"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     node_id: Mapped[str] = mapped_column(String(36), ForeignKey("nodes.id", ondelete="CASCADE"))
     serial: Mapped[str] = mapped_column(String)
     spiffe_uri: Mapped[str] = mapped_column(String)  # spiffe://xgen/node/<node_id>
@@ -85,7 +85,7 @@ class NodeInventory(Base):
 
 class NodeInventoryHistory(Base):  # content_hash 변경 시 append
     __tablename__ = "node_inventory_history"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     node_id: Mapped[str] = mapped_column(String(36), ForeignKey("nodes.id", ondelete="CASCADE"))
     content_hash: Mapped[str | None] = mapped_column(String)
     data: Mapped[dict | None] = mapped_column(JSON)
@@ -151,7 +151,7 @@ class Command(Base):  # 하행 명령 상태 영속 (CP 재시작 복원, P0-3)
 
 class JobLog(Base):  # 무손실, (job_id, source, offset) 중복 제거 (P0-3)
     __tablename__ = "job_logs"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     job_id: Mapped[str] = mapped_column(String(36), ForeignKey("jobs.id", ondelete="CASCADE"))
     ts_unix_ms: Mapped[int | None] = mapped_column(BigInteger)
     source: Mapped[str | None] = mapped_column(String)
@@ -199,7 +199,7 @@ class Operator(Base):  # 운영자 인증 (P0-4)
 
 class AuditLog(Base):
     __tablename__ = "audit_log"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     actor: Mapped[str | None] = mapped_column(String)
     action: Mapped[str | None] = mapped_column(String)
     target: Mapped[str | None] = mapped_column(String)
