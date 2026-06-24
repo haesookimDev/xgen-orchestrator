@@ -57,7 +57,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("join token not configured (XGEN_JOIN_TOKEN)")
 	}
 
-	mid, err := machineid.Get()
+	mid, err := machineid.GetOrCreate(cfg.Dir)
 	if err != nil {
 		return fmt.Errorf("machine-id: %w", err)
 	}

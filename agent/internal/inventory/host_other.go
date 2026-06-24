@@ -1,7 +1,6 @@
-//go:build !linux
+//go:build !linux && !darwin
 
-// 호스트 인벤토리 (비-Linux) — 최소 정보. 에이전트는 Linux가 대상이나, darwin 등에서
-// 빌드/로컬 테스트가 되도록 둔다.
+// 호스트 인벤토리 (Linux/darwin 외) — 최소 정보(빌드 가능성 보장용).
 package inventory
 
 import (
