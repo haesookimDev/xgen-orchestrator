@@ -27,6 +27,12 @@ class Settings:
         self.jwt_secret = os.getenv("XGEN_JWT_SECRET", "dev-insecure-change-me")
         self.admin_user = os.getenv("XGEN_ADMIN_USER", "admin")
         self.admin_password = os.getenv("XGEN_ADMIN_PASSWORD", "admin")
+        # MinIO 번들 저장 (비어있으면 로컬 파일시스템 bundle_dir 사용).
+        self.minio_endpoint = os.getenv("XGEN_MINIO_ENDPOINT", "")  # host:port
+        self.minio_access_key = os.getenv("XGEN_MINIO_ACCESS_KEY", "")
+        self.minio_secret_key = os.getenv("XGEN_MINIO_SECRET_KEY", "")
+        self.minio_bucket = os.getenv("XGEN_MINIO_BUCKET", "xgen-bundles")
+        self.minio_secure = os.getenv("XGEN_MINIO_SECURE", "false").lower() == "true"
 
 
 settings = Settings()

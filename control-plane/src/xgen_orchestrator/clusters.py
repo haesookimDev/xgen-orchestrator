@@ -30,6 +30,7 @@ def _dispatch(db, node_id: str, action: str, cmd: str, cluster_id: str, role: st
     params = {"cmd": cmd, "_cluster_id": cluster_id, "_cluster_role": role}
     db.add(models.Job(id=job_id, node_id=node_id, command_id=command_id, kind=action,
                       phase="pending", params=params, created_at=now))
+    db.flush()  # Job 먼저 INSERT (Postgres FK)
     db.add(models.Command(command_id=command_id, node_id=node_id, job_id=job_id,
                           sent_at=now, attempt=1))
     db.commit()
