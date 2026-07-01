@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import time
+
 import uvicorn
 
 from .config import settings
@@ -12,8 +14,19 @@ from .enrollment.ca import InternalCA
 from .grpc.server import serve_grpc
 
 
+def _init_db_with_retry(attempts: int = 30) -> None:
+    for i in range(attempts):
+        try:
+            init_db()
+            return
+        except Exception:
+            if i == attempts - 1:
+                raise
+            time.sleep(2)  # Postgres 등 기동 대기
+
+
 def main() -> None:
-    init_db()
+    _init_db_with_retry()
     ca = InternalCA.load_or_create(settings.ca_dir)
     grpc_server = serve_grpc(settings.host, settings.grpc_port, ca, settings.grpc_sans)
     print(f"gRPC AgentStream (mTLS) on {settings.host}:{settings.grpc_port}")

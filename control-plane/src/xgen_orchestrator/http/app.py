@@ -12,12 +12,12 @@ import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from .. import auth, clusters
+from .. import auth, clusters, storage
 from ..config import settings
 from ..db import models
 from ..db.session import SessionLocal, init_db
@@ -110,6 +110,7 @@ def enroll(req: EnrollRequest) -> EnrollResponse:
             node.hostname = req.node_info.hostname
             node.last_seen_at = now
         node_id = node.id
+        db.flush()  # Node 먼저 INSERT (Postgres FK: node_certs.node_id -> nodes.id)
 
         try:
             cert_pem = _ca.sign_csr(req.csr.encode(), node_id)
@@ -175,16 +176,13 @@ async def upload_artifact(bundle_id: str, request: Request,
     if not body:
         raise HTTPException(status_code=400, detail="empty artifact")
     sha = hashlib.sha256(body).hexdigest()
-    os.makedirs(settings.bundle_dir, exist_ok=True)
-    path = os.path.join(settings.bundle_dir, f"{bundle_id}.tar.gz")
-    with open(path, "wb") as f:
-        f.write(body)
+    uri = storage.put_artifact(bundle_id, body)  # MinIO 또는 로컬 FS
     with SessionLocal() as db:
         b = db.get(models.Bundle, bundle_id)
         if b is None:
             raise HTTPException(status_code=404, detail="unknown bundle")
         b.sha256 = sha
-        b.storage_uri = path
+        b.storage_uri = uri
         b.size_bytes = len(body)
         db.commit()
     auth.audit(op["sub"], "bundle.artifact", bundle_id, {"sha256": sha, "size": len(body)})
@@ -198,8 +196,8 @@ def bundle_blob(bundle_id: str):
         b = db.get(models.Bundle, bundle_id)
         if b is None or not b.storage_uri:
             raise HTTPException(status_code=404, detail="no artifact")
-        path = b.storage_uri
-    return FileResponse(path, media_type="application/gzip", filename=f"{bundle_id}.tar.gz")
+        uri = b.storage_uri
+    return Response(content=storage.get_artifact(uri), media_type="application/gzip")
 
 
 class JobCreate(BaseModel):
@@ -289,6 +287,7 @@ def create_job(node_id: str, body: JobCreate, op: dict = Depends(auth.require_op
         db.add(models.Job(
             id=job_id, node_id=node_id, command_id=command_id, kind=action,
             phase="pending", bundle_ref=body.bundle, params=params, created_at=now))
+        db.flush()  # Job 먼저 INSERT (Postgres FK: commands.job_id -> jobs.id)
         db.add(models.Command(
             command_id=command_id, node_id=node_id, job_id=job_id, sent_at=now, attempt=1))
         db.commit()
