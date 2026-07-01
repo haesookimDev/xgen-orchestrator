@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from .. import auth
+from .. import auth, clusters
 from ..config import settings
 from ..db import models
 from ..db.session import SessionLocal, init_db
@@ -348,6 +348,49 @@ def get_job_logs(job_id: str, _v: dict = Depends(auth.require_viewer)) -> list[d
             {"offset": r.offset, "stream": r.stream, "ts_unix_ms": r.ts_unix_ms, "text": r.text}
             for r in rows
         ]
+
+
+class ClusterCreate(BaseModel):
+    name: str
+    runtime: str = "k3s"
+    bundle: str  # "solution@version" (manifest runtime needs server+join actions)
+    server: str  # server node_id
+    workers: list[str] = []
+
+
+@app.post("/v1/clusters")
+def create_cluster(body: ClusterCreate, op: dict = Depends(auth.require_operator)) -> dict:
+    try:
+        cid = clusters.create_and_start(body.name, body.runtime, body.bundle, body.server, body.workers)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    auth.audit(op["sub"], "cluster.create", cid,
+               {"server": body.server, "workers": body.workers, "bundle": body.bundle})
+    return {"cluster_id": cid, "status": "forming"}
+
+
+@app.get("/v1/clusters")
+def list_clusters(_v: dict = Depends(auth.require_viewer)) -> list[dict]:
+    with SessionLocal() as db:
+        return [
+            {"id": c.id, "name": c.name, "runtime": c.runtime, "status": c.status,
+             "server_url": c.server_url}
+            for c in db.scalars(select(models.Cluster)).all()
+        ]
+
+
+@app.get("/v1/clusters/{cluster_id}")
+def get_cluster(cluster_id: str, _v: dict = Depends(auth.require_viewer)) -> dict:
+    with SessionLocal() as db:
+        c = db.get(models.Cluster, cluster_id)
+        if c is None:
+            raise HTTPException(status_code=404, detail="unknown cluster")
+        nodes = db.scalars(select(models.Node).where(models.Node.cluster_id == cluster_id)).all()
+        return {
+            "id": c.id, "name": c.name, "runtime": c.runtime, "status": c.status,
+            "server_url": c.server_url, "plan": c.plan,
+            "nodes": [{"node_id": n.id, "hostname": n.hostname, "role": n.cluster_role} for n in nodes],
+        }
 
 
 @app.get("/v1/nodes/{node_id}/inventory")

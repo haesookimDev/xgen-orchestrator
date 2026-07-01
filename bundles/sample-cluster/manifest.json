@@ -1,0 +1,14 @@
+{
+  "solution_id": "sample-cluster",
+  "version": "0.1.0",
+  "_note": "멀티노드 데모. server 액션이 join 토큰/URL을 로그 마커로 내보내면 CP가 수확해 worker join에 주입한다. 실제 k3s는 setup-k3s.sh / setup-k3s-agent.sh 로 교체.",
+  "runtimes": {
+    "k3s": {
+      "requires": { "cpu_cores": 1, "mem_gb": 1 },
+      "actions": {
+        "server": { "cmd": "echo '[k3s] installing server on '$(hostname); echo XGEN_SERVER_URL=https://$(hostname):6443; echo XGEN_CLUSTER_TOKEN=tok-$(hostname)-$$; echo '[k3s] server ready'" },
+        "join": { "cmd": "echo '[k3s] joining '$SERVER_URL' with token '$TOKEN' from '$(hostname); echo '[k3s] worker joined'" }
+      }
+    }
+  }
+}

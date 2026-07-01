@@ -116,6 +116,7 @@ class Cluster(Base):
     version: Mapped[str | None] = mapped_column(String)
     server_url: Mapped[str | None] = mapped_column(String)
     status: Mapped[str | None] = mapped_column(String)  # forming|ready|degraded
+    plan: Mapped[dict | None] = mapped_column(JSON)  # {runtime,bundle,server_node,workers,job ids}
     created_at: Mapped[str | None] = mapped_column(DateTime(timezone=True))
 
 
