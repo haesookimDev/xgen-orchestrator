@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import queue
 import threading
+import time
 import urllib.request
 from concurrent import futures
 
@@ -69,7 +70,12 @@ class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
 
         threading.Thread(target=reader, daemon=True).start()
         try:
+            next_check = time.monotonic() + 3.0
             while not stop.is_set() and context.is_active():
+                if time.monotonic() >= next_check:
+                    next_check = time.monotonic() + 3.0
+                    if self._is_denied(peer):
+                        break  # disable/revoke 시 활성 stream 능동 종료
                 try:
                     yield outq.get(timeout=1.0)
                 except queue.Empty:
@@ -82,6 +88,12 @@ class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
     # ---- 상행 처리 ----
 
     @staticmethod
+    def _is_denied(node_id: str) -> bool:
+        with SessionLocal() as db:
+            node = db.get(models.Node, node_id)
+            return node is None or node.status in _DENY_STATUS
+
+    @staticmethod
     def _touch(node_id: str | None, online: bool = True, agent_version: str | None = None) -> None:
         if not node_id:
             return
@@ -91,7 +103,9 @@ class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
             if node is None:
                 return
             node.last_seen_at = now
-            node.status = "online" if online else "offline"
+            # 관리자 상태(disabled/revoked)는 heartbeat이 online으로 되살리지 않음
+            if node.status not in _DENY_STATUS:
+                node.status = "online" if online else "offline"
             if agent_version:
                 node.agent_version = agent_version
             db.commit()

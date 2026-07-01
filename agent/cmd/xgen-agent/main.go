@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/xgen/orchestrator/agent/internal/config"
 	"github.com/xgen/orchestrator/agent/internal/enroll"
@@ -36,9 +37,22 @@ func main() {
 		log.Printf("already enrolled as node_id=%s", cfg.NodeID())
 	}
 
-	// 단일 outbound mTLS bidi stream 수립 -> 인벤토리/메트릭/로그 push, 명령 수신.
-	if err := transport.Run(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
-		log.Fatalf("stream: %v", err)
+	// 단일 outbound mTLS bidi stream — 끊기면 지수 백오프로 재연결 (CP 재시작/네트워크
+	// 블립/노드 disable 후 enable 복구). ctx 취소(SIGTERM) 시에만 종료.
+	backoff := time.Second
+	for ctx.Err() == nil {
+		err := transport.Run(ctx, cfg)
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+			break
+		}
+		log.Printf("stream: %v — %s 후 재연결", err, backoff)
+		select {
+		case <-ctx.Done():
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > 30*time.Second {
+			backoff = 30 * time.Second
+		}
 	}
 	log.Println("shutdown")
 }
