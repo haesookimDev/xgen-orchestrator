@@ -65,3 +65,40 @@ def test_job_gates(tmp_path):
         # 노드 락 -> busy 409
         r = client.post("/v1/nodes/n1/jobs", headers=h, json={"bundle": "demo@1.0.0", "action": "install"})
         assert r.status_code == 409 and "busy" in r.json()["detail"]
+
+
+def test_runtime_preflight_gate(tmp_path):
+    """런타임 가용성 게이트 — inventory.runtimes 로 요청 런타임 차단/허용 (15 §2)."""
+    _env(tmp_path)
+    from fastapi.testclient import TestClient
+
+    from xgen_orchestrator.db import models
+    from xgen_orchestrator.db.session import SessionLocal
+    from xgen_orchestrator.http.app import app
+
+    now = dt.datetime.now(dt.timezone.utc)
+    with TestClient(app) as client:
+        h = _auth(client)
+        with SessionLocal() as db:
+            db.add(models.Node(id="n2", machine_id="m2", hostname="h2", status="online",
+                               os="linux", arch="amd64", enrolled_at=now, last_seen_at=now))
+            # docker 사용 불가(false), k3s 가능(true) 인 노드
+            db.add(models.NodeInventory(node_id="n2", content_hash="y", collected_at=now,
+                                        data={"cpu": {"logical_cores": 8},
+                                              "memory": {"total_bytes": str(16 * 1024 ** 3)},
+                                              "runtimes": {"docker": False, "k3s": True}}))
+            db.commit()
+        assert client.post("/v1/bundles", headers=h, json={
+            "solution_id": "svc", "version": "1.0.0",
+            "manifest": {"runtimes": {
+                "docker": {"requires": {}, "actions": {"install": {"cmd": "echo d"}}},
+                "k3s": {"requires": {}, "actions": {"install": {"cmd": "echo k"}}}}}}).status_code == 200
+
+        # docker 요청 → 런타임 불가로 412
+        r = client.post("/v1/nodes/n2/jobs", headers=h,
+                        json={"bundle": "svc@1.0.0", "runtime": "docker", "action": "install"})
+        assert r.status_code == 412 and "runtime" in r.json()["detail"]
+        # k3s 요청 → 게이트 통과 후 에이전트 미연결 409
+        r = client.post("/v1/nodes/n2/jobs", headers=h,
+                        json={"bundle": "svc@1.0.0", "runtime": "k3s", "action": "install"})
+        assert r.status_code == 409 and "not connected" in r.json()["detail"]

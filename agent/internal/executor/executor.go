@@ -11,7 +11,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -87,6 +89,26 @@ func Run(ctx context.Context, nodeID string, sendCh chan<- *pb.AgentMessage, com
 	if workdir != "" {
 		c.Dir = workdir
 	}
+	// params(비밀 아님) → env, secret_refs → 로컬 store에서 해석 → env.
+	// 비밀값은 stream/로그에 남기지 않고 자식 프로세스 env로만 주입.
+	env := os.Environ()
+	for k, v := range rj.GetParams() {
+		if k == "entry" || k == "cmd" || k == "timeout_sec" {
+			continue // 예약키는 env 오염 방지
+		}
+		env = append(env, k+"="+v)
+	}
+	secretsDir := filepath.Join(filepath.Dir(bundlePubPath), "secrets")
+	for _, ref := range rj.GetSecretRefs() {
+		val, ok := resolveSecret(ref, secretsDir)
+		if !ok {
+			emit("stderr", "secret unresolved: "+ref)
+			finish(pb.JobUpdate_FAILED, 1, "secret unresolved: "+ref)
+			return
+		}
+		env = append(env, ref+"="+val)
+	}
+	c.Env = env
 	// 자체 프로세스 그룹으로 실행 → 취소/timeout 시 자식(예: sleep)까지 그룹 kill.
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	c.Cancel = func() error {
@@ -135,4 +157,29 @@ func Run(ctx context.Context, nodeID string, sendCh chan<- *pb.AgentMessage, com
 	default:
 		finish(pb.JobUpdate_SUCCEEDED, 0, "")
 	}
+}
+
+// resolveSecret — secret_ref 값을 로컬 store에서 해석. 우선순위:
+//  1. 환경변수 XGEN_SECRET_<REF>  (REF의 비영숫자는 _로 치환, 대문자화)
+//  2. 파일 <secretsDir>/<ref>     (값은 trailing 개행 제거)
+//
+// 값은 자식 프로세스 env로만 전달되고 stream/로그엔 남지 않는다.
+func resolveSecret(ref, secretsDir string) (string, bool) {
+	envKey := "XGEN_SECRET_" + strings.ToUpper(nonAlnumToUnderscore(ref))
+	if v, ok := os.LookupEnv(envKey); ok {
+		return v, true
+	}
+	if b, err := os.ReadFile(filepath.Join(secretsDir, ref)); err == nil {
+		return strings.TrimRight(string(b), "\r\n"), true
+	}
+	return "", false
+}
+
+func nonAlnumToUnderscore(s string) string {
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return '_'
+	}, s)
 }
