@@ -362,9 +362,15 @@ class JobCreate(BaseModel):
     force: bool = False  # Pre-flight 우회 (운영자 override, audit TODO)
 
 
-def _preflight(requires: dict | None, runtime: str, node_id: str, db) -> str | None:
-    """manifest.requires + 런타임 가용성 vs 노드 인벤토리. 부족하면 사유, 통과면 None."""
-    need = requires or {}
+def _preflight(rt: dict | None, runtime: str, node_id: str, db) -> str | None:
+    """manifest 런타임 블록 + 런타임 가용성 vs 노드 인벤토리. 부족하면 사유, 통과면 None.
+
+    rt = manifest.runtimes[runtime] = {"requires": {...}, "bootstrap": bool?, "actions": {...}}.
+    bootstrap=true 런타임(예: k3s 설치)은 노드에 아직 그 런타임이 없는 게 정상이므로
+    런타임 가용성 게이트를 건너뛴다(자원 게이트는 유지).
+    """
+    rt = rt or {}
+    need = rt.get("requires") or {}
     inv = db.get(models.NodeInventory, node_id)
     if inv is None or not inv.data:
         return "no inventory to pre-flight against"
@@ -379,10 +385,11 @@ def _preflight(requires: dict | None, runtime: str, node_id: str, db) -> str | N
         return f"memory {mem_gb:.1f}GB < required {need['mem_gb']}GB"
     if gpu < need.get("gpu", 0):
         return f"gpu count {gpu} < required {need['gpu']}"
-    # 런타임 가용성 게이트 — 인벤토리에 runtimes 필드가 있을 때만(구버전 에이전트 호환)
-    runtimes = data.get("runtimes")
-    if isinstance(runtimes, dict) and runtimes.get(runtime) is not True:
-        return f"runtime {runtime!r} not available on node"
+    # 런타임 가용성 게이트 — bootstrap 런타임은 제외, 인벤토리에 runtimes 필드 있을 때만
+    if not rt.get("bootstrap"):
+        runtimes = data.get("runtimes")
+        if isinstance(runtimes, dict) and runtimes.get(runtime) is not True:
+            return f"runtime {runtime!r} not available on node"
     return None
 
 
@@ -421,7 +428,7 @@ def create_job(node_id: str, body: JobCreate, op: dict = Depends(auth.require_op
                 raise HTTPException(status_code=400, detail=f"action {action} not in manifest")
             # Pre-flight 하드 게이트 (force로 우회 가능)
             if not body.force:
-                err = _preflight(rt.get("requires"), body.runtime, node_id, db)
+                err = _preflight(rt, body.runtime, node_id, db)
                 if err:
                     raise HTTPException(status_code=412, detail=f"pre-flight failed: {err}")
             if "entry" in act:
