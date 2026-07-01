@@ -23,6 +23,10 @@ class Settings:
         self.public_url = os.getenv("XGEN_PUBLIC_URL", f"http://127.0.0.1:{self.port}")
         # VictoriaMetrics ingest (메트릭). 비어있으면 메트릭 drop(best-effort).
         self.vm_url = os.getenv("XGEN_VM_URL", "http://127.0.0.1:8428")
+        # 운영자 인증 (P0-4). JWT 서명 시크릿 + 초기 admin 시드.
+        self.jwt_secret = os.getenv("XGEN_JWT_SECRET", "dev-insecure-change-me")
+        self.admin_user = os.getenv("XGEN_ADMIN_USER", "admin")
+        self.admin_password = os.getenv("XGEN_ADMIN_PASSWORD", "admin")
 
 
 settings = Settings()
