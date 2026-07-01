@@ -19,6 +19,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 func server() string {
@@ -36,6 +38,9 @@ func main() {
 	}
 	cmd, rest := args[0], args[1:]
 	switch cmd {
+	case "login":
+		need(rest, 2, "login <username> <password>")
+		login(rest[0], rest[1])
 	case "nodes":
 		getPretty("/v1/nodes")
 	case "bundles":
@@ -60,14 +65,63 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, `xgenctl — xgen-orchestrator operator CLI
+  login <user> <pass>        authenticate (saves token)
   nodes                      list nodes
   inventory <node_id>        node HW inventory
   bundles                    bundle catalog
   install <node_id> <sol@ver> [runtime=docker] [action=install]
   job <job_id>               job status
   logs <job_id>              job logs
-env: XGEN_CP_URL (default http://127.0.0.1:18080)
+env: XGEN_CP_URL (default http://127.0.0.1:18080), XGEN_TOKEN (else ~/.xgenctl-token)
 `)
+}
+
+func tokenPath() string {
+	h, _ := os.UserHomeDir()
+	return filepath.Join(h, ".xgenctl-token")
+}
+
+func token() string {
+	if v := os.Getenv("XGEN_TOKEN"); v != "" {
+		return v
+	}
+	if b, err := os.ReadFile(tokenPath()); err == nil {
+		return strings.TrimSpace(string(b))
+	}
+	return ""
+}
+
+func login(user, pass string) {
+	body, _ := json.Marshal(map[string]string{"username": user, "password": pass})
+	resp, err := http.Post(server()+"/v1/login", "application/json", bytes.NewReader(body))
+	checkResp(resp, err)
+	defer resp.Body.Close()
+	var r struct {
+		Token string `json:"token"`
+		Role  string `json:"role"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		fail(err)
+	}
+	if err := os.WriteFile(tokenPath(), []byte(r.Token), 0o600); err != nil {
+		fail(err)
+	}
+	fmt.Printf("logged in as %s (role=%s), token saved to %s\n", user, r.Role, tokenPath())
+}
+
+// authed — GET with Authorization header.
+func authed(method, url string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if t := token(); t != "" {
+		req.Header.Set("Authorization", "Bearer "+t)
+	}
+	return http.DefaultClient.Do(req)
 }
 
 func need(args []string, n int, form string) {
@@ -78,7 +132,7 @@ func need(args []string, n int, form string) {
 }
 
 func getPretty(path string) {
-	resp, err := http.Get(server() + path)
+	resp, err := authed(http.MethodGet, server()+path, nil)
 	checkResp(resp, err)
 	defer resp.Body.Close()
 	var v any
@@ -90,7 +144,7 @@ func getPretty(path string) {
 }
 
 func printLogs(path string) {
-	resp, err := http.Get(server() + path)
+	resp, err := authed(http.MethodGet, server()+path, nil)
 	checkResp(resp, err)
 	defer resp.Body.Close()
 	var lines []struct {
@@ -116,7 +170,7 @@ func install(rest []string) {
 	body, _ := json.Marshal(map[string]any{
 		"bundle": rest[1], "runtime": runtime, "action": action,
 	})
-	resp, err := http.Post(server()+"/v1/nodes/"+rest[0]+"/jobs", "application/json", bytes.NewReader(body))
+	resp, err := authed(http.MethodPost, server()+"/v1/nodes/"+rest[0]+"/jobs", bytes.NewReader(body))
 	checkResp(resp, err)
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)

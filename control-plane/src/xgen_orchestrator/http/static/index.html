@@ -19,8 +19,18 @@
   </style>
 </head>
 <body>
-  <h1>xgen-orchestrator <small id="cp"></small></h1>
-  <div class="row">
+  <h1>xgen-orchestrator <small id="cp"></small>
+    <span id="who" style="float:right;font-size:.8rem"></span></h1>
+
+  <div id="login" style="display:none;border:1px solid #8884;padding:1rem;max-width:320px">
+    <h2>Login</h2>
+    <p><input id="u" placeholder="username" value="admin" /></p>
+    <p><input id="p" type="password" placeholder="password" value="admin" /></p>
+    <button onclick="doLogin()">login</button>
+    <span id="lerr" style="color:#c33"></span>
+  </div>
+
+  <div id="app" class="row">
     <div class="col">
       <h2>Nodes <button onclick="loadNodes()">↻</button></h2>
       <table><thead><tr><th>hostname</th><th>status</th><th>os/arch</th><th></th></tr></thead>
@@ -36,8 +46,46 @@
   </div>
 
 <script>
-const api = (p, o) => fetch(p, o).then(r => r.ok ? r.json() : r.text().then(t => Promise.reject(t)));
+function tok() { return localStorage.getItem('xgen_token') || ''; }
+function api(p, o = {}) {
+  o.headers = Object.assign({}, o.headers, tok() ? { Authorization: 'Bearer ' + tok() } : {});
+  return fetch(p, o).then(r => {
+    if (r.status === 401) { showLogin(); throw 'unauthorized'; }
+    return r.ok ? r.json() : r.text().then(t => Promise.reject(t));
+  });
+}
 document.getElementById('cp').textContent = location.origin;
+
+function showLogin() {
+  document.getElementById('login').style.display = 'block';
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('who').textContent = '';
+}
+function showApp() {
+  document.getElementById('login').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  document.getElementById('who').textContent = 'logged in · ';
+  const lo = document.createElement('a'); lo.href = '#'; lo.textContent = 'logout';
+  lo.onclick = () => { localStorage.removeItem('xgen_token'); showLogin(); };
+  const w = document.getElementById('who'); w.appendChild(lo);
+}
+async function doLogin() {
+  const u = document.getElementById('u').value, p = document.getElementById('p').value;
+  try {
+    const r = await fetch('/v1/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: u, password: p })
+    });
+    if (!r.ok) throw await r.text();
+    const d = await r.json();
+    localStorage.setItem('xgen_token', d.token);
+    boot();
+  } catch (e) { document.getElementById('lerr').textContent = 'login failed'; }
+}
+function boot() {
+  if (!tok()) { showLogin(); return; }
+  showApp(); loadNodes(); loadBundles();
+}
 
 async function loadNodes() {
   const tb = document.getElementById('nodes'); tb.innerHTML = '';
@@ -113,7 +161,7 @@ async function pollJob(id, n=0) {
   setTimeout(() => pollJob(id, n+1), 1000);
 }
 
-loadNodes(); loadBundles();
+boot();
 </script>
 </body>
 </html>

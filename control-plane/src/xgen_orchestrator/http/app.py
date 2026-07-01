@@ -11,12 +11,13 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
+from .. import auth
 from ..config import settings
 from ..db import models
 from ..db.session import SessionLocal, init_db
@@ -31,6 +32,7 @@ _ca: InternalCA | None = None
 async def lifespan(app: FastAPI):
     global _ca
     init_db()
+    auth.seed_admin()
     _ca = InternalCA.load_or_create(settings.ca_dir)
     yield
 
@@ -64,6 +66,20 @@ class EnrollResponse(BaseModel):
 @app.get("/healthz")
 def healthz() -> dict:
     return {"status": "ok"}
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/v1/login")
+def login(body: LoginRequest) -> dict:
+    with SessionLocal() as db:
+        op = db.scalar(select(models.Operator).where(models.Operator.username == body.username))
+        if op is None or not auth.verify_pw(body.password, op.pw_hash):
+            raise HTTPException(status_code=401, detail="invalid credentials")
+        return {"token": auth.make_token(op.username, op.role), "role": op.role}
 
 
 @app.post("/v1/enroll", response_model=EnrollResponse)
@@ -122,7 +138,7 @@ class BundleCreate(BaseModel):
 
 
 @app.post("/v1/bundles")
-def register_bundle(body: BundleCreate) -> dict:
+def register_bundle(body: BundleCreate, op: dict = Depends(auth.require_operator)) -> dict:
     now = dt.datetime.now(dt.timezone.utc)
     bid = str(uuid.uuid4())
     with SessionLocal() as db:
@@ -137,11 +153,12 @@ def register_bundle(body: BundleCreate) -> dict:
             id=bid, solution_id=body.solution_id, version=body.version,
             is_latest=True, manifest=body.manifest, created_at=now))
         db.commit()
+    auth.audit(op["sub"], "bundle.register", f"{body.solution_id}@{body.version}", {"id": bid})
     return {"id": bid, "solution_id": body.solution_id, "version": body.version}
 
 
 @app.get("/v1/bundles")
-def list_bundles() -> list[dict]:
+def list_bundles(_v: dict = Depends(auth.require_viewer)) -> list[dict]:
     with SessionLocal() as db:
         return [
             {"id": b.id, "solution_id": b.solution_id, "version": b.version,
@@ -151,7 +168,8 @@ def list_bundles() -> list[dict]:
 
 
 @app.put("/v1/bundles/{bundle_id}/artifact")
-async def upload_artifact(bundle_id: str, request: Request) -> dict:
+async def upload_artifact(bundle_id: str, request: Request,
+                          op: dict = Depends(auth.require_operator)) -> dict:
     """번들 tarball(.tar.gz) 업로드 → CP 저장 + sha256 기록. (raw octet-stream body)"""
     body = await request.body()
     if not body:
@@ -169,6 +187,7 @@ async def upload_artifact(bundle_id: str, request: Request) -> dict:
         b.storage_uri = path
         b.size_bytes = len(body)
         db.commit()
+    auth.audit(op["sub"], "bundle.artifact", bundle_id, {"sha256": sha, "size": len(body)})
     return {"id": bundle_id, "sha256": sha, "size_bytes": len(body)}
 
 
@@ -212,7 +231,7 @@ def _preflight(requires: dict | None, node_id: str, db) -> str | None:
 
 
 @app.post("/v1/nodes/{node_id}/jobs")
-def create_job(node_id: str, body: JobCreate) -> dict:
+def create_job(node_id: str, body: JobCreate, op: dict = Depends(auth.require_operator)) -> dict:
     """Job 생성 → (번들 manifest 해석 + Pre-flight + 노드 락) → RunJob 명령 push."""
     now = dt.datetime.now(dt.timezone.utc)
     job_id = str(uuid.uuid4())
@@ -282,11 +301,13 @@ def create_job(node_id: str, body: JobCreate) -> dict:
     )
     if not hub.send(node_id, stream_pb2.ServerMessage(command=cmd)):
         raise HTTPException(status_code=409, detail="node not connected to stream")
+    auth.audit(op["sub"], "job.create", node_id,
+               {"job_id": job_id, "bundle": body.bundle, "action": action})
     return {"job_id": job_id, "command_id": command_id, "phase": "pending"}
 
 
 @app.get("/v1/jobs/{job_id}")
-def get_job(job_id: str) -> dict:
+def get_job(job_id: str, _v: dict = Depends(auth.require_viewer)) -> dict:
     with SessionLocal() as db:
         j = db.get(models.Job, job_id)
         if j is None:
@@ -301,7 +322,7 @@ def get_job(job_id: str) -> dict:
 
 
 @app.get("/v1/jobs/{job_id}/logs")
-def get_job_logs(job_id: str) -> list[dict]:
+def get_job_logs(job_id: str, _v: dict = Depends(auth.require_viewer)) -> list[dict]:
     with SessionLocal() as db:
         rows = db.scalars(
             select(models.JobLog).where(models.JobLog.job_id == job_id)
@@ -314,7 +335,7 @@ def get_job_logs(job_id: str) -> list[dict]:
 
 
 @app.get("/v1/nodes/{node_id}/inventory")
-def node_inventory(node_id: str) -> dict:
+def node_inventory(node_id: str, _v: dict = Depends(auth.require_viewer)) -> dict:
     with SessionLocal() as db:
         inv = db.get(models.NodeInventory, node_id)
         if inv is None:
@@ -340,7 +361,7 @@ def node_inventory(node_id: str) -> dict:
 
 
 @app.get("/v1/nodes")
-def list_nodes() -> list[dict]:
+def list_nodes(_v: dict = Depends(auth.require_viewer)) -> list[dict]:
     with SessionLocal() as db:
         nodes = db.scalars(select(models.Node)).all()
         return [

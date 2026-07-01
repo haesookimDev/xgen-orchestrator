@@ -56,8 +56,10 @@ def test_enroll_signs_and_registers(tmp_path):
         uris = san.get_values_for_type(x509.UniformResourceIdentifier)
         assert uris == [f"spiffe://xgen/node/{data['node_id']}"]
 
-        # 노드 목록에 노출
-        nodes = client.get("/v1/nodes").json()
+        # 노드 목록에 노출 (viewer 인증 필요)
+        assert client.get("/v1/nodes").status_code == 401  # 무인증 거부
+        tok = client.post("/v1/login", json={"username": "admin", "password": "admin"}).json()["token"]
+        nodes = client.get("/v1/nodes", headers={"Authorization": "Bearer " + tok}).json()
         assert any(n["machine_id"] == mid for n in nodes)
 
         # 잘못된 토큰 거부
