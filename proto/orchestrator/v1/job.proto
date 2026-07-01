@@ -26,6 +26,7 @@ message RunJob {
   string bundle_url = 6; // CP bundle proxy (mTLS)
   string bundle_sha256 = 7;
   repeated string secret_refs = 8; // 값 아닌 참조로 주입
+  string bundle_sig = 9; // 번들 서명(base64 ECDSA) — 에이전트가 pubkey로 진위 검증
 }
 
 message RefreshInventory {}

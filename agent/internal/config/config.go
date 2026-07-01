@@ -66,10 +66,11 @@ func resolveGRPC(server string) string {
 	return host + ":" + port
 }
 
-func (c *Config) KeyPath() string   { return filepath.Join(c.Dir, "agent.key") }
-func (c *Config) CertPath() string  { return filepath.Join(c.Dir, "agent.crt") }
-func (c *Config) CAPath() string    { return filepath.Join(c.Dir, "ca.crt") }
-func (c *Config) statePath() string { return filepath.Join(c.Dir, "state.json") }
+func (c *Config) KeyPath() string       { return filepath.Join(c.Dir, "agent.key") }
+func (c *Config) CertPath() string      { return filepath.Join(c.Dir, "agent.crt") }
+func (c *Config) CAPath() string        { return filepath.Join(c.Dir, "ca.crt") }
+func (c *Config) BundlePubPath() string { return filepath.Join(c.Dir, "bundle-sign.pub") }
+func (c *Config) statePath() string     { return filepath.Join(c.Dir, "state.json") }
 
 // NodeID — 등록으로 발급된 노드 식별자.
 func (c *Config) NodeID() string { return c.state.NodeID }

@@ -43,9 +43,10 @@ type enrollRequest struct {
 }
 
 type enrollResponse struct {
-	NodeID     string `json:"node_id"`
-	ClientCert string `json:"client_cert"` // PEM
-	CABundle   string `json:"ca_bundle"`   // PEM
+	NodeID       string `json:"node_id"`
+	ClientCert   string `json:"client_cert"`   // PEM
+	CABundle     string `json:"ca_bundle"`     // PEM
+	BundlePubkey string `json:"bundle_pubkey"` // 번들 서명 검증용 공개키 PEM
 }
 
 // Run — 등록 수행. 성공 시 key/cert/ca 저장 + node_id 영속화.
@@ -115,6 +116,11 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	if er.CABundle != "" {
 		if err := os.WriteFile(cfg.CAPath(), []byte(er.CABundle), 0o644); err != nil {
 			return fmt.Errorf("write ca: %w", err)
+		}
+	}
+	if er.BundlePubkey != "" {
+		if err := os.WriteFile(cfg.BundlePubPath(), []byte(er.BundlePubkey), 0o644); err != nil {
+			return fmt.Errorf("write bundle pubkey: %w", err)
 		}
 	}
 	return cfg.SetNodeID(er.NodeID)

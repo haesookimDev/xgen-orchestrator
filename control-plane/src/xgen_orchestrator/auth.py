@@ -77,6 +77,21 @@ def require_operator(authorization: str = Header(default=None)) -> dict:
     return c
 
 
+def make_bundle_token(bundle_id: str) -> str:
+    """번들 blob 다운로드용 단기 토큰 (에이전트는 인증 stream으로 URL 수령)."""
+    now = dt.datetime.now(dt.timezone.utc)
+    return jwt.encode({"bundle": bundle_id, "exp": now + dt.timedelta(minutes=15)},
+                      settings.jwt_secret, algorithm="HS256")
+
+
+def verify_bundle_token(token: str, bundle_id: str) -> bool:
+    try:
+        c = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+        return c.get("bundle") == bundle_id
+    except Exception:
+        return False
+
+
 def audit(actor: str, action: str, target: str, detail: dict | None = None) -> None:
     now = dt.datetime.now(dt.timezone.utc)
     with SessionLocal() as db:

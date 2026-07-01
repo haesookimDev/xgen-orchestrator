@@ -11,13 +11,13 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from .. import auth, clusters, storage
+from .. import auth, bundlesign, clusters, storage
 from ..config import settings
 from ..db import models
 from ..db.session import SessionLocal, init_db
@@ -26,14 +26,16 @@ from ..grpc.hub import hub
 from ..pb import job_pb2, stream_pb2
 
 _ca: InternalCA | None = None
+_signer: bundlesign.BundleSigner | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _ca
+    global _ca, _signer
     init_db()
     auth.seed_admin()
     _ca = InternalCA.load_or_create(settings.ca_dir)
+    _signer = bundlesign.BundleSigner.load_or_create(settings.ca_dir)
     yield
 
 
@@ -61,6 +63,7 @@ class EnrollResponse(BaseModel):
     node_id: str
     client_cert: str  # PEM
     ca_bundle: str  # PEM
+    bundle_pubkey: str = ""  # 번들 서명 검증용 공개키(PEM)
 
 
 @app.get("/healthz")
@@ -129,6 +132,7 @@ def enroll(req: EnrollRequest) -> EnrollResponse:
         node_id=node_id,
         client_cert=cert_pem.decode(),
         ca_bundle=_ca.pem.decode(),
+        bundle_pubkey=_signer.pub_pem(),
     )
 
 
@@ -177,12 +181,14 @@ async def upload_artifact(bundle_id: str, request: Request,
         raise HTTPException(status_code=400, detail="empty artifact")
     sha = hashlib.sha256(body).hexdigest()
     uri = storage.put_artifact(bundle_id, body)  # MinIO 또는 로컬 FS
+    sig = _signer.sign(body)  # 번들 서명 (진위)
     with SessionLocal() as db:
         b = db.get(models.Bundle, bundle_id)
         if b is None:
             raise HTTPException(status_code=404, detail="unknown bundle")
         b.sha256 = sha
         b.storage_uri = uri
+        b.cosign_bundle = sig
         b.size_bytes = len(body)
         db.commit()
     auth.audit(op["sub"], "bundle.artifact", bundle_id, {"sha256": sha, "size": len(body)})
@@ -190,8 +196,11 @@ async def upload_artifact(bundle_id: str, request: Request,
 
 
 @app.get("/v1/bundles/{bundle_id}/blob")
-def bundle_blob(bundle_id: str):
-    """번들 아티팩트 다운로드. TODO(P1-1): mTLS proxy / 토큰. 무결성은 sha256(스트림 경유 전달)."""
+def bundle_blob(bundle_id: str, t: str = Query(default="")):
+    """번들 아티팩트 다운로드. 단기 다운로드 토큰(인증 stream으로 전달) 필요.
+    무결성=sha256 + 진위=서명(둘 다 stream으로 전달). TODO: 클라이언트-cert mTLS 강화."""
+    if not auth.verify_bundle_token(t, bundle_id):
+        raise HTTPException(status_code=401, detail="invalid or missing download token")
     with SessionLocal() as db:
         b = db.get(models.Bundle, bundle_id)
         if b is None or not b.storage_uri:
@@ -238,6 +247,7 @@ def create_job(node_id: str, body: JobCreate, op: dict = Depends(auth.require_op
     params = dict(body.params)
     bundle_url = ""
     bundle_sha256 = ""
+    bundle_sig = ""
 
     with SessionLocal() as db:
         node = db.get(models.Node, node_id)
@@ -270,8 +280,10 @@ def create_job(node_id: str, body: JobCreate, op: dict = Depends(auth.require_op
                 if not bundle.sha256 or not bundle.storage_uri:
                     raise HTTPException(status_code=409, detail="bundle has no artifact uploaded")
                 params["entry"] = act["entry"]
-                bundle_url = f"{settings.public_url}/v1/bundles/{bundle.id}/blob"
+                token = auth.make_bundle_token(bundle.id)
+                bundle_url = f"{settings.public_url}/v1/bundles/{bundle.id}/blob?t={token}"
                 bundle_sha256 = bundle.sha256
+                bundle_sig = bundle.cosign_bundle or ""
             else:
                 params["cmd"] = act["cmd"]
 
@@ -296,7 +308,7 @@ def create_job(node_id: str, body: JobCreate, op: dict = Depends(auth.require_op
         command_id=command_id,
         run_job=job_pb2.RunJob(
             job_id=job_id, action=action, params=params, bundle_ref=body.bundle or "",
-            bundle_url=bundle_url, bundle_sha256=bundle_sha256),
+            bundle_url=bundle_url, bundle_sha256=bundle_sha256, bundle_sig=bundle_sig),
     )
     if not hub.send(node_id, stream_pb2.ServerMessage(command=cmd)):
         raise HTTPException(status_code=409, detail="node not connected to stream")
