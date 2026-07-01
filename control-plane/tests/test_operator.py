@@ -106,3 +106,38 @@ def test_operator_surface(tmp_path):
             assert line["text"] == "hello"
             end = ws.receive_json()
             assert end["event"] == "end" and end["phase"] == "succeeded"
+
+
+def test_touch_preserves_admin_status(tmp_path):
+    """회귀: disabled/revoked 노드를 heartbeat(_touch)이 online으로 되살리지 않아야 한다."""
+    import datetime as dt
+
+    os.environ["XGEN_DATABASE_URL"] = f"sqlite:///{tmp_path}/cp.db"
+    from xgen_orchestrator.db import models
+    from xgen_orchestrator.db.session import SessionLocal, init_db
+    from xgen_orchestrator.grpc.server import AgentStreamServicer
+
+    init_db()
+    # 공유 엔진(모듈 싱글턴) 오염 방지 — tmp_path 기반 고유 id/machine_id
+    nid = "touch-" + tmp_path.name
+    now = dt.datetime.now(dt.timezone.utc)
+    with SessionLocal() as db:
+        db.add(models.Node(id=nid, hostname="h", machine_id=nid, os="linux",
+                           arch="amd64", status="disabled", enrolled_at=now))
+        db.commit()
+
+    svc = AgentStreamServicer()
+    # heartbeat이 disabled를 덮어쓰지 않음 + _is_denied True
+    svc._touch(nid, online=True)
+    with SessionLocal() as db:
+        assert db.get(models.Node, nid).status == "disabled"
+    assert svc._is_denied(nid) is True
+
+    # 정상 노드는 online/offline 전이 + _is_denied False
+    with SessionLocal() as db:
+        db.get(models.Node, nid).status = "offline"
+        db.commit()
+    svc._touch(nid, online=True)
+    with SessionLocal() as db:
+        assert db.get(models.Node, nid).status == "online"
+    assert svc._is_denied(nid) is False

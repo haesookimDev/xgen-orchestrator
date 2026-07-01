@@ -62,9 +62,23 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	}
 	defer conn.Close()
 
-	stream, err := pb.NewAgentStreamClient(conn).Connect(ctx)
+	// 연결 단위 컨텍스트 — stream이 끊기면 connCancel로 모든 goroutine·ticker 정리.
+	connCtx, connCancel := context.WithCancel(ctx)
+	defer connCancel()
+
+	stream, err := pb.NewAgentStreamClient(conn).Connect(connCtx)
 	if err != nil {
 		return err
+	}
+
+	// stream 사멸 신호 — sender/recv goroutine이 실패 시 1회 전달, Run이 반환하여 재연결.
+	streamErr := make(chan error, 2)
+	fail := func(err error) {
+		select {
+		case streamErr <- err:
+		default:
+		}
+		connCancel()
 	}
 
 	// 단일 송신 경로 — 여러 producer(hello/inventory/heartbeat/executor)가 동시에
@@ -73,17 +87,18 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	send := func(m *pb.AgentMessage) {
 		select {
 		case sendCh <- m:
-		case <-ctx.Done():
+		case <-connCtx.Done():
 		}
 	}
 	go func() {
 		for {
 			select {
-			case <-ctx.Done():
+			case <-connCtx.Done():
 				return
 			case m := <-sendCh:
 				if err := stream.Send(m); err != nil {
 					log.Printf("stream: send failed: %v", err)
+					fail(err)
 					return
 				}
 			}
@@ -110,6 +125,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		for {
 			msg, err := stream.Recv()
 			if err != nil {
+				fail(err)
 				return
 			}
 			c := msg.GetCommand()
@@ -120,7 +136,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 				continue
 			}
 			if rj := c.GetRunJob(); rj != nil {
-				jobCtx, jc := context.WithCancel(ctx)
+				jobCtx, jc := context.WithCancel(connCtx)
 				jobsMu.Lock()
 				jobCancels[rj.GetJobId()] = jc
 				jobsMu.Unlock()
@@ -151,7 +167,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		defer mt.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-connCtx.Done():
 				return
 			case <-mt.C:
 				send(&pb.AgentMessage{NodeId: cfg.NodeID(), Payload: &pb.AgentMessage_Metrics{Metrics: metrics.Collect(ctx, cfg.NodeID())}})
@@ -166,6 +182,8 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case err := <-streamErr:
+			return fmt.Errorf("stream closed: %w", err)
 		case <-t.C:
 			send(&pb.AgentMessage{NodeId: cfg.NodeID(), Payload: &pb.AgentMessage_Heartbeat{Heartbeat: &pb.Heartbeat{TsUnixMs: time.Now().UnixMilli()}}})
 		}
