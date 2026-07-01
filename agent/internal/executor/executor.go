@@ -23,7 +23,7 @@ import (
 const defaultTimeout = 3600 * time.Second
 
 // Run — RunJob 1건 실행. ctx 취소 시 CANCELLED, timeout 시 FAILED(timeout).
-func Run(ctx context.Context, nodeID string, sendCh chan<- *pb.AgentMessage, commandID string, rj *pb.RunJob) {
+func Run(ctx context.Context, nodeID string, sendCh chan<- *pb.AgentMessage, commandID string, rj *pb.RunJob, bundlePubPath string) {
 	jobID := rj.GetJobId()
 	push := func(m *pb.AgentMessage) {
 		m.NodeId = nodeID
@@ -64,7 +64,7 @@ func Run(ctx context.Context, nodeID string, sendCh chan<- *pb.AgentMessage, com
 
 	var cmdStr, workdir string
 	if rj.GetBundleUrl() != "" {
-		dir, err := fetchAndExtract(runCtx, rj.GetBundleUrl(), rj.GetBundleSha256())
+		dir, err := fetchAndExtract(runCtx, rj.GetBundleUrl(), rj.GetBundleSha256(), rj.GetBundleSig(), bundlePubPath)
 		if err != nil {
 			emit("stderr", "bundle: "+err.Error())
 			finish(pb.JobUpdate_FAILED, 1, "bundle fetch failed")

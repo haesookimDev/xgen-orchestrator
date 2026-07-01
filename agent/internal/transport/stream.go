@@ -132,7 +132,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 						jobsMu.Unlock()
 						jc()
 					}()
-					executor.Run(jobCtx, cfg.NodeID(), sendCh, cmdID, rj2)
+					executor.Run(jobCtx, cfg.NodeID(), sendCh, cmdID, rj2, cfg.BundlePubPath())
 				}(rj, c.GetCommandId())
 			} else if cj := c.GetCancel(); cj != nil {
 				log.Printf("stream: CancelJob job=%s", cj.GetJobId())
