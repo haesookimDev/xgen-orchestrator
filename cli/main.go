@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func server() string {
@@ -52,15 +53,35 @@ func main() {
 		need(rest, 1, "job <job_id>")
 		getPretty("/v1/jobs/" + rest[0])
 	case "logs":
-		need(rest, 1, "logs <job_id>")
-		printLogs("/v1/jobs/" + rest[0] + "/logs")
+		need(rest, 1, "logs <job_id> [-f]")
+		if len(rest) >= 2 && rest[1] == "-f" {
+			followLogs(rest[0])
+		} else {
+			printLogs("/v1/jobs/" + rest[0] + "/logs")
+		}
 	case "cancel":
 		need(rest, 1, "cancel <job_id>")
-		resp, err := authed(http.MethodPost, server()+"/v1/jobs/"+rest[0]+"/cancel", nil)
-		checkResp(resp, err)
-		b, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		fmt.Println(string(b))
+		postJSON("/v1/jobs/"+rest[0]+"/cancel", nil)
+	case "token-create":
+		body := map[string]any{}
+		if len(rest) >= 1 {
+			body["type"] = rest[0]
+		}
+		postJSON("/v1/tokens", body)
+	case "token-list":
+		getPretty("/v1/tokens")
+	case "token-revoke":
+		need(rest, 1, "token-revoke <id>")
+		postJSON("/v1/tokens/"+rest[0]+"/revoke", nil)
+	case "node-disable":
+		need(rest, 1, "node-disable <node_id>")
+		postJSON("/v1/nodes/"+rest[0]+"/disable", nil)
+	case "node-enable":
+		need(rest, 1, "node-enable <node_id>")
+		postJSON("/v1/nodes/"+rest[0]+"/enable", nil)
+	case "node-revoke":
+		need(rest, 1, "node-revoke <node_id>")
+		postJSON("/v1/nodes/"+rest[0]+"/revoke", nil)
 	case "install":
 		need(rest, 2, "install <node_id> <sol@ver> [runtime] [action]")
 		install(rest)
@@ -86,8 +107,14 @@ func usage() {
   bundles                    bundle catalog
   install <node_id> <sol@ver> [runtime=docker] [action=install]
   job <job_id>               job status
-  logs <job_id>              job logs
+  logs <job_id> [-f]         job logs (-f follow/tail)
   cancel <job_id>            cancel a running job
+  token-create [type]        create join token (shared|one_time), prints once
+  token-list                 list join tokens
+  token-revoke <id>          revoke a join token
+  node-disable <node_id>     disable node (blocks agent stream)
+  node-enable <node_id>      re-enable a disabled node
+  node-revoke <node_id>      revoke node cert (permanent)
   clusters                   list clusters
   cluster <cluster_id>       cluster detail
   cluster-create <name> <sol@ver> <server_node> [worker_nodes...]
@@ -188,6 +215,53 @@ func clusterCreate(rest []string) {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	fmt.Println(string(b))
+}
+
+func postJSON(path string, body any) {
+	var r io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		r = bytes.NewReader(b)
+	}
+	resp, err := authed(http.MethodPost, server()+path, r)
+	checkResp(resp, err)
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	fmt.Println(string(b))
+}
+
+func followLogs(jobID string) {
+	seen := 0
+	for {
+		resp, err := authed(http.MethodGet, server()+"/v1/jobs/"+jobID+"/logs", nil)
+		checkResp(resp, err)
+		var lines []struct {
+			Offset int    `json:"offset"`
+			Stream string `json:"stream"`
+			Text   string `json:"text"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&lines)
+		resp.Body.Close()
+		for _, l := range lines {
+			if l.Offset >= seen {
+				fmt.Printf("%s: %s\n", l.Stream, l.Text)
+				seen = l.Offset + 1
+			}
+		}
+		jr, err := authed(http.MethodGet, server()+"/v1/jobs/"+jobID, nil)
+		checkResp(jr, err)
+		var j struct {
+			Phase string `json:"phase"`
+		}
+		_ = json.NewDecoder(jr.Body).Decode(&j)
+		jr.Body.Close()
+		switch j.Phase {
+		case "succeeded", "failed", "cancelled", "interrupted":
+			fmt.Println("--", j.Phase, "--")
+			return
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 func install(rest []string) {
