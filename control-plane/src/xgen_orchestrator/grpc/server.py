@@ -160,6 +160,14 @@ class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
             if job.phase in _TERMINAL and job.finished_at is None:
                 job.finished_at = now
             db.commit()
+            terminal_cluster_job = (
+                job.id if job.phase in _TERMINAL and job.params
+                and job.params.get("_cluster_id") else None)
+
+        # 클러스터 소속 Job이 종료되면 클러스터 조율 진행 (별도 세션).
+        if terminal_cluster_job:
+            from .. import clusters
+            clusters.advance(terminal_cluster_job)
 
     @staticmethod
     def _write_metrics(batch) -> None:

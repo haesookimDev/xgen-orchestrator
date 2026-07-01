@@ -64,6 +64,14 @@ func main() {
 	case "install":
 		need(rest, 2, "install <node_id> <sol@ver> [runtime] [action]")
 		install(rest)
+	case "clusters":
+		getPretty("/v1/clusters")
+	case "cluster":
+		need(rest, 1, "cluster <cluster_id>")
+		getPretty("/v1/clusters/" + rest[0])
+	case "cluster-create":
+		need(rest, 3, "cluster-create <name> <sol@ver> <server_node> [worker_nodes...]")
+		clusterCreate(rest)
 	default:
 		usage()
 		os.Exit(2)
@@ -80,6 +88,9 @@ func usage() {
   job <job_id>               job status
   logs <job_id>              job logs
   cancel <job_id>            cancel a running job
+  clusters                   list clusters
+  cluster <cluster_id>       cluster detail
+  cluster-create <name> <sol@ver> <server_node> [worker_nodes...]
 env: XGEN_CP_URL (default http://127.0.0.1:18080), XGEN_TOKEN (else ~/.xgenctl-token)
 `)
 }
@@ -165,6 +176,18 @@ func printLogs(path string) {
 	for _, l := range lines {
 		fmt.Printf("%s: %s\n", l.Stream, l.Text)
 	}
+}
+
+func clusterCreate(rest []string) {
+	body, _ := json.Marshal(map[string]any{
+		"name": rest[0], "bundle": rest[1], "runtime": "k3s",
+		"server": rest[2], "workers": rest[3:],
+	})
+	resp, err := authed(http.MethodPost, server()+"/v1/clusters", bytes.NewReader(body))
+	checkResp(resp, err)
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	fmt.Println(string(b))
 }
 
 func install(rest []string) {
