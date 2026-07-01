@@ -102,3 +102,35 @@ def test_runtime_preflight_gate(tmp_path):
         r = client.post("/v1/nodes/n2/jobs", headers=h,
                         json={"bundle": "svc@1.0.0", "runtime": "k3s", "action": "install"})
         assert r.status_code == 409 and "not connected" in r.json()["detail"]
+
+
+def test_bootstrap_runtime_bypasses_gate(tmp_path):
+    """bootstrap 런타임(k3s 설치)은 노드에 그 런타임이 없어도 게이트 통과 (15 §k3s)."""
+    _env(tmp_path)
+    from fastapi.testclient import TestClient
+
+    from xgen_orchestrator.db import models
+    from xgen_orchestrator.db.session import SessionLocal
+    from xgen_orchestrator.http.app import app
+
+    now = dt.datetime.now(dt.timezone.utc)
+    with TestClient(app) as client:
+        h = _auth(client)
+        with SessionLocal() as db:
+            db.add(models.Node(id="n3", machine_id="m3", hostname="h3", status="online",
+                               os="linux", arch="amd64", enrolled_at=now, last_seen_at=now))
+            # k3s 미설치 노드
+            db.add(models.NodeInventory(node_id="n3", content_hash="z", collected_at=now,
+                                        data={"cpu": {"logical_cores": 8},
+                                              "memory": {"total_bytes": str(16 * 1024 ** 3)},
+                                              "runtimes": {"k3s": False}}))
+            db.commit()
+        # bootstrap 런타임 번들
+        assert client.post("/v1/bundles", headers=h, json={
+            "solution_id": "boot", "version": "1.0.0",
+            "manifest": {"runtimes": {"k3s": {"bootstrap": True, "requires": {},
+                                              "actions": {"install": {"cmd": "echo k"}}}}}}).status_code == 200
+        # k3s 미설치라도 bootstrap이라 게이트 통과 → 에이전트 미연결 409
+        r = client.post("/v1/nodes/n3/jobs", headers=h,
+                        json={"bundle": "boot@1.0.0", "runtime": "k3s", "action": "install"})
+        assert r.status_code == 409 and "not connected" in r.json()["detail"]

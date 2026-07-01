@@ -1,0 +1,15 @@
+{
+  "solution_id": "xgen-k3s",
+  "version": "0.1.0",
+  "runtimes": {
+    "k3s": {
+      "bootstrap": true,
+      "requires": { "cpu_cores": 2, "mem_gb": 4, "gpu": 0 },
+      "actions": {
+        "install":   { "entry": "bash install.sh" },
+        "status":    { "entry": "bash status.sh" },
+        "uninstall": { "entry": "bash uninstall.sh" }
+      }
+    }
+  }
+}

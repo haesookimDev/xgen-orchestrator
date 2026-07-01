@@ -1,0 +1,5 @@
+# <src-relative-to-XGEN_INFRA_PATH>   <dest-in-bundle>
+# k3s 부트스트랩 자산. setup-k3s.sh는 PROJECT_ROOT=<script>/../.. 기준으로
+# k3s/cluster/registries.yaml 등을 참조하므로 트리 레이아웃(xgen-infra/k3s/...)을 유지한다.
+k3s/scripts   xgen-infra/k3s/scripts
+k3s/cluster   xgen-infra/k3s/cluster
