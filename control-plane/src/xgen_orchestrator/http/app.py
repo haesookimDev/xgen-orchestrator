@@ -358,11 +358,12 @@ class JobCreate(BaseModel):
     runtime: str = "docker"  # docker|k3s
     action: str = "status"  # install|uninstall|status...
     params: dict[str, str] = {}
+    secret_refs: list[str] = []  # 비밀 참조(값 아님) — 에이전트가 로컬 store에서 해석
     force: bool = False  # Pre-flight 우회 (운영자 override, audit TODO)
 
 
-def _preflight(requires: dict | None, node_id: str, db) -> str | None:
-    """manifest.requires vs 노드 인벤토리. 부족하면 사유 문자열, 통과면 None."""
+def _preflight(requires: dict | None, runtime: str, node_id: str, db) -> str | None:
+    """manifest.requires + 런타임 가용성 vs 노드 인벤토리. 부족하면 사유, 통과면 None."""
     need = requires or {}
     inv = db.get(models.NodeInventory, node_id)
     if inv is None or not inv.data:
@@ -378,6 +379,10 @@ def _preflight(requires: dict | None, node_id: str, db) -> str | None:
         return f"memory {mem_gb:.1f}GB < required {need['mem_gb']}GB"
     if gpu < need.get("gpu", 0):
         return f"gpu count {gpu} < required {need['gpu']}"
+    # 런타임 가용성 게이트 — 인벤토리에 runtimes 필드가 있을 때만(구버전 에이전트 호환)
+    runtimes = data.get("runtimes")
+    if isinstance(runtimes, dict) and runtimes.get(runtime) is not True:
+        return f"runtime {runtime!r} not available on node"
     return None
 
 
@@ -416,7 +421,7 @@ def create_job(node_id: str, body: JobCreate, op: dict = Depends(auth.require_op
                 raise HTTPException(status_code=400, detail=f"action {action} not in manifest")
             # Pre-flight 하드 게이트 (force로 우회 가능)
             if not body.force:
-                err = _preflight(rt.get("requires"), node_id, db)
+                err = _preflight(rt.get("requires"), body.runtime, node_id, db)
                 if err:
                     raise HTTPException(status_code=412, detail=f"pre-flight failed: {err}")
             if "entry" in act:
@@ -452,7 +457,8 @@ def create_job(node_id: str, body: JobCreate, op: dict = Depends(auth.require_op
         command_id=command_id,
         run_job=job_pb2.RunJob(
             job_id=job_id, action=action, params=params, bundle_ref=body.bundle or "",
-            bundle_url=bundle_url, bundle_sha256=bundle_sha256, bundle_sig=bundle_sig),
+            bundle_url=bundle_url, bundle_sha256=bundle_sha256, bundle_sig=bundle_sig,
+            secret_refs=body.secret_refs),
     )
     if not hub.send(node_id, stream_pb2.ServerMessage(command=cmd)):
         raise HTTPException(status_code=409, detail="node not connected to stream")

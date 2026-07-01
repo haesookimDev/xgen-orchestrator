@@ -1,0 +1,3 @@
+# <src-relative-to-XGEN_INFRA_PATH>   <dest-in-bundle>
+# 실제 인프라 compose 스택(postgres·redis·qdrant·minio)을 빌드 시점에 복사(비벤더).
+compose/k3s-infra   k3s-infra

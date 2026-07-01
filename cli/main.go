@@ -105,7 +105,7 @@ func usage() {
   nodes                      list nodes
   inventory <node_id>        node HW inventory
   bundles                    bundle catalog
-  install <node_id> <sol@ver> [runtime=docker] [action=install]
+  install <node_id> <sol@ver> [runtime=docker] [action=install] [-p k=v]... [-s ref]...
   job <job_id>               job status
   logs <job_id> [-f]         job logs (-f follow/tail)
   cancel <job_id>            cancel a running job
@@ -265,21 +265,38 @@ func followLogs(jobID string) {
 }
 
 func install(rest []string) {
+	// install <node> <sol@ver> [runtime] [action] [-p k=v]... [-s ref]...
 	runtime, action := "docker", "install"
-	if len(rest) >= 3 {
-		runtime = rest[2]
+	params := map[string]string{}
+	secrets := []string{}
+	pos := 0
+	for i := 2; i < len(rest); i++ {
+		switch rest[i] {
+		case "-p":
+			i++
+			if i < len(rest) {
+				if k, v, ok := strings.Cut(rest[i], "="); ok {
+					params[k] = v
+				}
+			}
+		case "-s":
+			i++
+			if i < len(rest) {
+				secrets = append(secrets, rest[i])
+			}
+		default:
+			if pos == 0 {
+				runtime = rest[i]
+			} else if pos == 1 {
+				action = rest[i]
+			}
+			pos++
+		}
 	}
-	if len(rest) >= 4 {
-		action = rest[3]
-	}
-	body, _ := json.Marshal(map[string]any{
+	postJSON("/v1/nodes/"+rest[0]+"/jobs", map[string]any{
 		"bundle": rest[1], "runtime": runtime, "action": action,
+		"params": params, "secret_refs": secrets,
 	})
-	resp, err := authed(http.MethodPost, server()+"/v1/nodes/"+rest[0]+"/jobs", bytes.NewReader(body))
-	checkResp(resp, err)
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	fmt.Println(string(b))
 }
 
 func checkResp(resp *http.Response, err error) {

@@ -14,6 +14,7 @@ message InventoryReport {
   Virtualization virt = 5;
   repeated GPUInfo gpus = 6;
   string content_hash = 7; // 동일 hash면 무전송 (변경 감지)
+  map<string, bool> runtimes = 8; // docker|compose|k3s 가용성 (pre-flight 런타임 게이트)
 }
 
 message CPUInfo {

@@ -37,6 +37,9 @@ func Collect(ctx context.Context) (*pb.InventoryReport, error) {
 	// 호스트 CPU/메모리/디스크/OS/가상화 — OS별 구현(collectHost).
 	collectHost(rep)
 
+	// 런타임 가용성 (docker/compose/k3s) — pre-flight 게이트용.
+	rep.Runtimes = detectRuntimes(ctx)
+
 	rep.ContentHash = contentHash(rep)
 	return rep, nil
 }
