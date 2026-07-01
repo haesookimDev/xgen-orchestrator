@@ -51,6 +51,7 @@ class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
                     kind = msg.WhichOneof("payload")
                     if kind == "hello":
                         self._touch(peer, online=True, agent_version=msg.hello.agent_version)
+                        self._recover(peer)  # 재연결=이전 실행중 Job은 죽음 -> interrupted
                         outq.put(stream_pb2.ServerMessage(
                             hello_ack=stream_pb2.HelloAck(resync_required=False)))
                     elif kind == "heartbeat":
@@ -125,6 +126,20 @@ class AgentStreamServicer(stream_pb2_grpc.AgentStreamServicer):
                     driver_version=g.driver_version, cuda_version=g.cuda_version,
                     mig_enabled=g.mig_enabled))
             db.commit()
+
+    @staticmethod
+    def _recover(node_id: str) -> None:
+        # 재연결 시 이전 연결에서 실행 중이던 Job은 유실 -> interrupted (노드 락도 해제됨).
+        now = dt.datetime.now(dt.timezone.utc)
+        with SessionLocal() as db:
+            stale = db.scalars(select(models.Job).where(
+                models.Job.node_id == node_id,
+                models.Job.phase.in_(["pending", "running"]))).all()
+            for j in stale:
+                j.phase = "interrupted"
+                j.finished_at = now
+            if stale:
+                db.commit()
 
     @staticmethod
     def _apply_job_update(ju) -> None:

@@ -306,6 +306,22 @@ def create_job(node_id: str, body: JobCreate, op: dict = Depends(auth.require_op
     return {"job_id": job_id, "command_id": command_id, "phase": "pending"}
 
 
+@app.post("/v1/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, op: dict = Depends(auth.require_operator)) -> dict:
+    with SessionLocal() as db:
+        j = db.get(models.Job, job_id)
+        if j is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+        if j.phase not in ("pending", "running"):
+            raise HTTPException(status_code=409, detail=f"job not cancellable (phase={j.phase})")
+        node_id = j.node_id
+    cmd = job_pb2.Command(command_id=str(uuid.uuid4()), cancel=job_pb2.CancelJob(job_id=job_id))
+    if not hub.send(node_id, stream_pb2.ServerMessage(command=cmd)):
+        raise HTTPException(status_code=409, detail="node not connected to stream")
+    auth.audit(op["sub"], "job.cancel", job_id, {"node": node_id})
+    return {"job_id": job_id, "status": "cancel requested"}
+
+
 @app.get("/v1/jobs/{job_id}")
 def get_job(job_id: str, _v: dict = Depends(auth.require_viewer)) -> dict:
     with SessionLocal() as db:
