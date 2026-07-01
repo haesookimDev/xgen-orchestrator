@@ -54,6 +54,13 @@ func main() {
 	case "logs":
 		need(rest, 1, "logs <job_id>")
 		printLogs("/v1/jobs/" + rest[0] + "/logs")
+	case "cancel":
+		need(rest, 1, "cancel <job_id>")
+		resp, err := authed(http.MethodPost, server()+"/v1/jobs/"+rest[0]+"/cancel", nil)
+		checkResp(resp, err)
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		fmt.Println(string(b))
 	case "install":
 		need(rest, 2, "install <node_id> <sol@ver> [runtime] [action]")
 		install(rest)
@@ -72,6 +79,7 @@ func usage() {
   install <node_id> <sol@ver> [runtime=docker] [action=install]
   job <job_id>               job status
   logs <job_id>              job logs
+  cancel <job_id>            cancel a running job
 env: XGEN_CP_URL (default http://127.0.0.1:18080), XGEN_TOKEN (else ~/.xgenctl-token)
 `)
 }

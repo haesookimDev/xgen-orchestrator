@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	pb "github.com/xgen/orchestrator/agent/gen/orchestrator/v1"
@@ -100,20 +101,46 @@ func Run(ctx context.Context, cfg *config.Config) error {
 			rep.GetCpu().GetModel(), len(rep.GetGpus()), rep.GetContentHash())
 	}
 
-	// 하행 수신 — Command(RunJob) 디스패치, HelloAck 로깅.
+	// 실행 중 Job의 취소 함수 레지스트리 (CancelJob 처리용).
+	var jobsMu sync.Mutex
+	jobCancels := map[string]context.CancelFunc{}
+
+	// 하행 수신 — RunJob 디스패치(취소 가능), CancelJob, HelloAck.
 	go func() {
 		for {
 			msg, err := stream.Recv()
 			if err != nil {
 				return
 			}
-			if c := msg.GetCommand(); c != nil {
-				if rj := c.GetRunJob(); rj != nil {
-					log.Printf("stream: RunJob job=%s action=%s", rj.GetJobId(), rj.GetAction())
-					go executor.Run(ctx, cfg.NodeID(), sendCh, c.GetCommandId(), rj)
+			c := msg.GetCommand()
+			if c == nil {
+				if msg.GetHelloAck() != nil {
+					log.Printf("stream: HelloAck (resync=%v)", msg.GetHelloAck().GetResyncRequired())
 				}
-			} else if msg.GetHelloAck() != nil {
-				log.Printf("stream: HelloAck (resync=%v)", msg.GetHelloAck().GetResyncRequired())
+				continue
+			}
+			if rj := c.GetRunJob(); rj != nil {
+				jobCtx, jc := context.WithCancel(ctx)
+				jobsMu.Lock()
+				jobCancels[rj.GetJobId()] = jc
+				jobsMu.Unlock()
+				log.Printf("stream: RunJob job=%s action=%s", rj.GetJobId(), rj.GetAction())
+				go func(rj2 *pb.RunJob, cmdID string) {
+					defer func() {
+						jobsMu.Lock()
+						delete(jobCancels, rj2.GetJobId())
+						jobsMu.Unlock()
+						jc()
+					}()
+					executor.Run(jobCtx, cfg.NodeID(), sendCh, cmdID, rj2)
+				}(rj, c.GetCommandId())
+			} else if cj := c.GetCancel(); cj != nil {
+				log.Printf("stream: CancelJob job=%s", cj.GetJobId())
+				jobsMu.Lock()
+				if fn := jobCancels[cj.GetJobId()]; fn != nil {
+					fn()
+				}
+				jobsMu.Unlock()
 			}
 		}
 	}()
