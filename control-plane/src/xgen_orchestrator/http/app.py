@@ -5,13 +5,15 @@ gRPC(에이전트 stream)는 grpc/server.py (다음 단계). 설계: 02-enrollme
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import hashlib
 import os
+import secrets
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -85,13 +87,155 @@ def login(body: LoginRequest) -> dict:
         return {"token": auth.make_token(op.username, op.role), "role": op.role}
 
 
-@app.post("/v1/enroll", response_model=EnrollResponse)
-def enroll(req: EnrollRequest) -> EnrollResponse:
-    if req.join_token != settings.join_token:
-        raise HTTPException(status_code=401, detail="invalid join token")
+# ---- join token 관리 (P0-2/07) ----
 
+class TokenCreate(BaseModel):
+    type: str = "shared"  # shared | one_time
+    ttl_hours: int | None = 24
+    max_uses: int | None = None
+
+
+@app.post("/v1/tokens")
+def create_token(body: TokenCreate, op: dict = Depends(auth.require_operator)) -> dict:
+    token = secrets.token_hex(16)
+    now = dt.datetime.now(dt.timezone.utc)
+    exp = now + dt.timedelta(hours=body.ttl_hours) if body.ttl_hours else None
+    tid = str(uuid.uuid4())
+    with SessionLocal() as db:
+        db.add(models.JoinToken(
+            id=tid, token_hash=hashlib.sha256(token.encode()).hexdigest(), type=body.type,
+            expires_at=exp, max_uses=body.max_uses, used_count=0, revoked=False,
+            created_by=op["sub"], created_at=now))
+        db.commit()
+    auth.audit(op["sub"], "token.create", tid, {"type": body.type})
+    return {"id": tid, "token": token, "type": body.type,
+            "expires_at": exp.isoformat() if exp else None, "max_uses": body.max_uses}
+
+
+@app.get("/v1/tokens")
+def list_tokens(_v: dict = Depends(auth.require_viewer)) -> list[dict]:
+    with SessionLocal() as db:
+        return [
+            {"id": t.id, "type": t.type, "revoked": t.revoked, "max_uses": t.max_uses,
+             "used_count": t.used_count, "created_by": t.created_by,
+             "expires_at": t.expires_at.isoformat() if t.expires_at else None}
+            for t in db.scalars(select(models.JoinToken)).all()
+        ]
+
+
+@app.post("/v1/tokens/{token_id}/revoke")
+def revoke_token(token_id: str, op: dict = Depends(auth.require_operator)) -> dict:
+    with SessionLocal() as db:
+        t = db.get(models.JoinToken, token_id)
+        if t is None:
+            raise HTTPException(status_code=404, detail="unknown token")
+        t.revoked = True
+        db.commit()
+    auth.audit(op["sub"], "token.revoke", token_id, None)
+    return {"id": token_id, "revoked": True}
+
+
+# ---- 노드 액션 (disable/enable/revoke) — 서버측 상태 게이트가 stream 차단 ----
+
+def _set_node_status(node_id: str, status: str, actor: str, action: str) -> dict:
     now = dt.datetime.now(dt.timezone.utc)
     with SessionLocal() as db:
+        n = db.get(models.Node, node_id)
+        if n is None:
+            raise HTTPException(status_code=404, detail="unknown node")
+        n.status = status
+        if status == "revoked":
+            for c in db.scalars(select(models.NodeCert).where(
+                    models.NodeCert.node_id == node_id)).all():
+                if c.revoked_at is None:
+                    c.revoked_at = now
+                    c.reason = action
+        db.commit()
+    auth.audit(actor, action, node_id, {"status": status})
+    return {"node_id": node_id, "status": status}
+
+
+@app.post("/v1/nodes/{node_id}/disable")
+def disable_node(node_id: str, op: dict = Depends(auth.require_operator)) -> dict:
+    return _set_node_status(node_id, "disabled", op["sub"], "node.disable")
+
+
+@app.post("/v1/nodes/{node_id}/enable")
+def enable_node(node_id: str, op: dict = Depends(auth.require_operator)) -> dict:
+    return _set_node_status(node_id, "offline", op["sub"], "node.enable")
+
+
+@app.post("/v1/nodes/{node_id}/revoke")
+def revoke_node(node_id: str, op: dict = Depends(auth.require_operator)) -> dict:
+    return _set_node_status(node_id, "revoked", op["sub"], "node.revoke")
+
+
+# ---- WebSocket 라이브 로그 tail (07) ----
+
+@app.websocket("/v1/jobs/{job_id}/logs/ws")
+async def job_logs_ws(ws: WebSocket, job_id: str, token: str = Query(default="")) -> None:
+    try:
+        auth._claims("Bearer " + token)  # 쿼리 토큰(JWT) 인증
+    except Exception:
+        await ws.close(code=1008)
+        return
+    await ws.accept()
+    sent = -1
+    try:
+        while True:
+            with SessionLocal() as db:
+                job = db.get(models.Job, job_id)
+                if job is None:
+                    await ws.close()
+                    return
+                phase = job.phase
+                rows = db.scalars(select(models.JobLog).where(
+                    models.JobLog.job_id == job_id, models.JobLog.offset > sent
+                ).order_by(models.JobLog.offset)).all()
+                data = [{"offset": r.offset, "stream": r.stream, "text": r.text} for r in rows]
+            for d in data:
+                await ws.send_json(d)
+                sent = d["offset"]
+            if phase in ("succeeded", "failed", "cancelled", "interrupted") and not data:
+                await ws.send_json({"event": "end", "phase": phase})
+                await ws.close()
+                return
+            await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        return
+
+
+def _consume_join_token(db, token: str) -> bool:
+    """부트스트랩 정적 토큰 또는 join_tokens 테이블 검증(+소진). caller가 commit."""
+    if token and token == settings.join_token:
+        return True
+    if not token:
+        return False
+    th = hashlib.sha256(token.encode()).hexdigest()
+    now = dt.datetime.now(dt.timezone.utc)
+    jt = db.scalar(select(models.JoinToken).where(models.JoinToken.token_hash == th))
+    if jt is None or jt.revoked:
+        return False
+    exp = jt.expires_at
+    if exp is not None:
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=dt.timezone.utc)
+        if exp < now:
+            return False
+    if jt.max_uses is not None and (jt.used_count or 0) >= jt.max_uses:
+        return False
+    jt.used_count = (jt.used_count or 0) + 1
+    if jt.type == "one_time":
+        jt.revoked = True
+    return True
+
+
+@app.post("/v1/enroll", response_model=EnrollResponse)
+def enroll(req: EnrollRequest) -> EnrollResponse:
+    now = dt.datetime.now(dt.timezone.utc)
+    with SessionLocal() as db:
+        if not _consume_join_token(db, req.join_token):
+            raise HTTPException(status_code=401, detail="invalid join token")
         node = db.scalar(
             select(models.Node).where(models.Node.machine_id == req.node_info.machine_id)
         )
