@@ -5,17 +5,24 @@
 
 services:
   control-plane:
-    build: ../control-plane
+    build:
+      context: ..                      # 레포 루트 (proto/agent/control-plane 접근)
+      dockerfile: control-plane/Dockerfile
     env_file: .env
+    environment:
+      XGEN_HOST: "0.0.0.0"
+      XGEN_DATABASE_URL: "sqlite:////data/cp.db"   # 2단계에서 Postgres로 전환
+      XGEN_CA_DIR: "/data/ca"
+      XGEN_BUNDLE_DIR: "/data/bundles"
+      XGEN_VM_URL: "http://victoriametrics:8428"
+      XGEN_GRPC_SAN: "${XGEN_GRPC_SAN:-127.0.0.1,localhost}"  # 외부 에이전트용은 호스트 IP 추가
     ports:
-      - "8000:8000"     # FastAPI (운영자 REST + install.sh/번들 서빙)
-      - "8443:8443"     # gRPC (에이전트 mTLS stream)
+      - "18080:18080"   # HTTP (운영자 REST + /ui + 번들 서빙)
+      - "18081:18081"   # gRPC (에이전트 mTLS stream)
     depends_on:
-      - postgres
       - victoriametrics
-      - minio
     volumes:
-      - cp-data:/var/lib/xgen-cp   # CA 키, 마스터 키(0600) 등
+      - cp-data:/data   # SQLite/CA/번들 (2단계에서 PG/MinIO로 이전)
 
   postgres:
     image: postgres:16
